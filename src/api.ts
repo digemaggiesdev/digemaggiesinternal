@@ -1,0 +1,194 @@
+export type RequestStatus = 'Needed' | 'Outreach' | 'In progress' | 'Received' | 'Closed'
+export type CommunicationStatus = 'Not started' | 'Contacted' | 'Follow-up' | 'Confirmed'
+export type SponsorStatus = 'Prospect' | 'Proposal sent' | 'Committed' | 'Received'
+export type SponsorLeadStatus = 'New' | 'Following up' | 'Contacted' | 'Converted' | 'Not pursuing'
+export type SponsorSupportType = 'Financial' | 'Parts / materials' | 'Equipment' | 'Services / expertise' | 'Other'
+
+export type TeamUser = {
+  id: string
+  email: string
+  displayName: string
+}
+
+export type PartRequest = {
+  id: string
+  item: string
+  company: string
+  link: string
+  contact: string
+  quantity: number
+  value: number
+  specs: string
+  compatibility: string
+  priority: 'Urgent' | 'High' | 'Normal' | 'Low'
+  subteam: string
+  relationship: string
+  communication: CommunicationStatus
+  status: RequestStatus
+  recurring: boolean
+  requestedBy: string
+  createdAt: string
+  createdBy: string
+}
+
+export type PartRequestInput = Omit<PartRequest, 'id' | 'createdAt' | 'createdBy'>
+
+export type Sponsor = {
+  id: string
+  company: string
+  contact: string
+  amount: number
+  status: SponsorStatus
+  deliverables: string[]
+  relationship: string
+  renewal: string
+  createdAt: string
+  createdBy: string
+}
+
+export type SponsorInput = Omit<Sponsor, 'id' | 'createdAt' | 'createdBy'>
+
+export type SponsorLead = {
+  id: string
+  company: string
+  contactName: string
+  contactRole: string
+  contactEmail: string
+  contactPhone: string
+  subteam: string
+  relationship: string
+  details: string
+  supportTypes: SponsorSupportType[]
+  supportDetails: string
+  estimatedAmount: number
+  canIntroduce: 'Yes' | 'No' | 'Not sure'
+  status: SponsorLeadStatus
+  createdAt: string
+  createdBy: string
+}
+
+export type SponsorLeadInput = Omit<SponsorLead, 'id' | 'status' | 'createdAt' | 'createdBy'>
+
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(path, {
+    ...options,
+    credentials: 'same-origin',
+    headers: {
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...options.headers,
+    },
+  })
+  const result = response.status === 204 ? undefined : await response.json().catch(() => ({}))
+  if (!response.ok) throw new ApiError(result?.error || 'The server could not complete that request.', response.status)
+  return result as T
+}
+
+export async function getSession() {
+  try {
+    const result = await request<{ user: TeamUser }>('/api/auth/me')
+    return result.user
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return null
+    throw error
+  }
+}
+
+export async function signIn(email: string, password: string) {
+  const result = await request<{ user: TeamUser }>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  })
+  return result.user
+}
+
+export async function signUp(displayName: string, email: string, password: string, inviteCode: string) {
+  const result = await request<{ user: TeamUser }>('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ displayName, email, password, inviteCode }),
+  })
+  return result.user
+}
+
+export async function signOut() {
+  await request<void>('/api/auth/logout', { method: 'POST' })
+}
+
+export async function getRequests() {
+  const result = await request<{ records: PartRequest[] }>('/api/requests')
+  return result.records
+}
+
+export async function createRequest(input: PartRequestInput) {
+  const result = await request<{ record: PartRequest }>('/api/requests', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+  return result.record
+}
+
+export async function updateRequest(id: string, changes: Partial<Pick<PartRequest, 'status' | 'communication'>>) {
+  const result = await request<{ record: PartRequest }>(`/api/requests/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+  return result.record
+}
+
+export async function deleteRequest(id: string) {
+  await request<void>(`/api/requests/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function getSponsors() {
+  const result = await request<{ records: Sponsor[] }>('/api/sponsorships')
+  return result.records
+}
+
+export async function createSponsor(input: SponsorInput) {
+  const result = await request<{ record: Sponsor }>('/api/sponsorships', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+  return result.record
+}
+
+export async function updateSponsor(id: string, status: SponsorStatus) {
+  const result = await request<{ record: Sponsor }>(`/api/sponsorships/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  })
+  return result.record
+}
+
+export async function getSponsorLeads() {
+  const result = await request<{ records: SponsorLead[] }>('/api/sponsor-leads')
+  return result.records
+}
+
+export async function createSponsorLead(input: SponsorLeadInput) {
+  const result = await request<{ record: SponsorLead }>('/api/sponsor-leads', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+  return result.record
+}
+
+export async function updateSponsorLead(id: string, status: SponsorLeadStatus) {
+  const result = await request<{ record: SponsorLead }>(`/api/sponsor-leads/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  })
+  return result.record
+}
+
+export async function deleteSponsorLead(id: string) {
+  await request<void>(`/api/sponsor-leads/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}

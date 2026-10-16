@@ -41,3 +41,4 @@ Set `PORT` if the host requires a specific port. Set a strong, private `TEAM_INV
 - CSV export opens in Excel or Google Sheets, but it is a snapshot rather than live spreadsheet synchronization.
 - Existing entries previously saved only in a browser are not automatically migrated into SQLite.
 - The initial deployment starts with empty shared tables; add team records after creating the first account.# digemaggiesinternal
+# digemaggiesinternal

@@ -1,6 +1,6 @@
 # Digem Aggies Internal Requests
 
-A team workspace for part requests and sponsor relationships. Members sign in to a shared SQLite-backed API; part status, seller communication, donor commitments, deliverables, and renewal dates are saved on the server.
+A team workspace for part requests and sponsor relationships. Local development uses Express and SQLite; production uses Netlify Functions and Netlify Database (Postgres).
 
 ## Run locally
 
@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal. The development command runs the API on port 3001 and proxies `/api` calls from the web app. New local accounts use the development invite code `digem-dev-invite` unless `TEAM_INVITE_CODE` is set in `.env`.
+Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. New local accounts use the development invite code `digem-dev-invite` unless `TEAM_INVITE_CODE` is set in `.env`.
 
 Useful commands:
 
@@ -21,16 +21,15 @@ npm run lint
 npm run build
 ```
 
-## Production deployment
+## Netlify deployment
 
-Build and run the app/API together on one server with persistent disk storage:
+1. Connect this repository to your Netlify site and enable **Netlify Database** under the site's **Data & storage** settings. Netlify Database requires a credit-based plan.
+2. The repository includes `@netlify/database`, the `/api/*` function at `netlify/functions/api.mjs`, and the initial schema migration at `netlify/database/migrations/0001_initial_schema.sql`. Netlify applies migrations during deploy and provides `NETLIFY_DB_URL` to functions automatically.
+3. Set `TEAM_INVITE_CODE` as a private Netlify Functions runtime environment variable. Do not set it as a frontend build variable. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
+4. Use `npm ci && npm run build` and `dist` as the publish directory; these are configured in `netlify.toml`.
+5. Deploy and check `https://<your-site>.netlify.app/api/health` returns `{"status":"ok"}`. Create the first account with the invite code.
 
-```sh
-npm run build
-NODE_ENV=production TEAM_INVITE_CODE='use-a-long-random-secret' DATABASE_PATH='/path/on/persistent-disk/digem.sqlite' npm start
-```
-
-Set `PORT` if the host requires a specific port. Set a strong, private `TEAM_INVITE_CODE` before exposing account registration. Serve the app over HTTPS; production sessions use secure, HTTP-only cookies. Keep the SQLite database on persistent storage and back up that file regularly. This SQLite setup is intended for one application server, not multiple server replicas sharing an ephemeral filesystem.
+Production sign-in, part requests, sponsor leads, and sponsorship records are handled by Netlify Functions and stored in Netlify Database. No Render or separate API server is used. Production sessions use HTTP-only, SameSite=Lax cookies with Secure enabled over HTTPS.
 
 ## Data and access
 
@@ -39,6 +38,6 @@ Set `PORT` if the host requires a specific port. Set a strong, private `TEAM_INV
 - Members can delete part requests and sponsor leads after confirming; sponsorship records remain separate.
 - Sponsor leads can include multiple support types: financial contributions, parts and materials, equipment, services or expertise, and other offers. The cash estimate is optional.
 - CSV export opens in Excel or Google Sheets, but it is a snapshot rather than live spreadsheet synchronization.
-- Existing entries previously saved only in a browser are not automatically migrated into SQLite.
+- Existing data in the local SQLite database is not automatically migrated into Netlify Database; export or migrate it before cutover if it needs to be kept.
 - The initial deployment starts with empty shared tables; add team records after creating the first account.# digemaggiesinternal
 # digemaggiesinternal

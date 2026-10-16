@@ -121,7 +121,7 @@ function App() {
   const authenticate = async (values: AuthValues) => {
     const nextUser = values.mode === 'signin'
       ? await signIn(values.email, values.password)
-      : await signUp(values.displayName, values.email, values.password, values.inviteCode)
+      : await signUp(values.displayName, values.email, values.password, values.subteam, values.inviteCode)
     setUser(nextUser)
     setAuthError('')
     try {
@@ -264,6 +264,7 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           <div className="workspace-status"><span className="status-dot" /> Team workspace</div>
+          <div className="workspace-user">{user.displayName} · {user.subteam || 'Subteam not set'}</div>
           <p>Requests and sponsorship records are shared with signed-in team members.</p>
           <button className="sidebar-link" onClick={() => downloadCsv(requests, sponsors, sponsorLeads)}><ArrowDownToLine size={16} /> Export spreadsheet</button>
         </div>

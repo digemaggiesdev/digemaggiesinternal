@@ -34,7 +34,7 @@ Set `PORT` if the host requires a specific port. Set a strong, private `TEAM_INV
 
 ## Data and access
 
-- New member accounts require an invite code. Passwords are stored as salted, derived hashes; sessions expire after seven days.
+- New member accounts require an invite code and record the member's subteam. Passwords are stored as salted, derived hashes; sessions expire after seven days.
 - Any signed-in team member can read and update the shared requests, sponsor leads, and sponsorships. There are no role-based permissions or password-reset flow yet.
 - Members can delete part requests and sponsor leads after confirming; sponsorship records remain separate.
 - Sponsor leads can include multiple support types: financial contributions, parts and materials, equipment, services or expertise, and other offers. The cash estimate is optional.

@@ -9,6 +9,7 @@ const optionalText = (max = 500) => z.string().trim().max(max).default('')
 
 export const registerSchema = z.object({
   displayName: z.string().trim().min(2).max(100),
+  subteam: z.string().trim().min(1).max(100),
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
   password: z.string().min(12).max(128),
   inviteCode: z.string().min(1).max(200),

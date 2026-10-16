@@ -45,3 +45,8 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS sponsor_leads_created_idx ON sponsor_leads(created_at DESC);
 `)
+
+const userColumns = db.pragma('table_info(users)')
+if (!userColumns.some((column) => column.name === 'subteam')) {
+  db.exec("ALTER TABLE users ADD COLUMN subteam TEXT NOT NULL DEFAULT ''")
+}

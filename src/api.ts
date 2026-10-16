@@ -8,6 +8,7 @@ export type TeamUser = {
   id: string
   email: string
   displayName: string
+  subteam: string
 }
 
 export type PartRequest = {
@@ -110,10 +111,10 @@ export async function signIn(email: string, password: string) {
   return result.user
 }
 
-export async function signUp(displayName: string, email: string, password: string, inviteCode: string) {
+export async function signUp(displayName: string, email: string, password: string, subteam: string, inviteCode: string) {
   const result = await request<{ user: TeamUser }>('/api/auth/register', {
     method: 'POST',
-    body: JSON.stringify({ displayName, email, password, inviteCode }),
+    body: JSON.stringify({ displayName, email, password, subteam, inviteCode }),
   })
   return result.user
 }

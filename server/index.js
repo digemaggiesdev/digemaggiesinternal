@@ -38,7 +38,7 @@ const authLimiter = rateLimit({
 })
 
 function publicUser(user) {
-  return { id: user.id, email: user.email, displayName: user.display_name }
+  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '' }
 }
 
 function getCookie(req, name) {
@@ -77,7 +77,7 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Sign in to continue.' })
 
   const session = db.prepare(`
-    SELECT users.id, users.email, users.display_name
+    SELECT users.id, users.email, users.display_name, users.subteam
     FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = ? AND sessions.expires_at > ?
   `).get(tokenHash(token), Date.now())
@@ -149,10 +149,10 @@ app.post('/api/auth/register', authLimiter, async (req, res, next) => {
   try {
     const id = randomUUID()
     const hash = await passwordHash(input.password)
-    db.prepare('INSERT INTO users (id, email, display_name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(id, input.email, input.displayName, hash, new Date().toISOString())
+    db.prepare('INSERT INTO users (id, email, display_name, subteam, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(id, input.email, input.displayName, input.subteam, hash, new Date().toISOString())
     issueSession(res, id)
-    res.status(201).json({ user: { id, email: input.email, displayName: input.displayName } })
+    res.status(201).json({ user: { id, email: input.email, displayName: input.displayName, subteam: input.subteam } })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
     next(error)

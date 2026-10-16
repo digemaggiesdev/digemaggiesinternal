@@ -7,6 +7,7 @@ type AuthMode = 'signin' | 'signup'
 export type AuthValues = {
   mode: AuthMode
   displayName: string
+  subteam: string
   email: string
   password: string
   inviteCode: string
@@ -20,6 +21,7 @@ type AuthScreenProps = {
 export function AuthScreen({ onAuthenticate, initialError = '' }: AuthScreenProps) {
   const [mode, setMode] = useState<AuthMode>('signin')
   const [displayName, setDisplayName] = useState('')
+  const [subteam, setSubteam] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [inviteCode, setInviteCode] = useState('')
@@ -31,7 +33,7 @@ export function AuthScreen({ onAuthenticate, initialError = '' }: AuthScreenProp
     setError('')
     setBusy(true)
     try {
-      await onAuthenticate({ mode, displayName, email, password, inviteCode })
+      await onAuthenticate({ mode, displayName, subteam, email, password, inviteCode })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to sign in right now.')
     } finally {
@@ -47,6 +49,7 @@ export function AuthScreen({ onAuthenticate, initialError = '' }: AuthScreenProp
       <p className="auth-description">{mode === 'signin' ? 'Sign in to manage part requests and sponsor relationships.' : 'Create your team account with the invite code shared by your lead.'}</p>
       <form onSubmit={submit}>
         {mode === 'signup' && <label className="field"><span>Your name</span><input required autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Full name" /></label>}
+        {mode === 'signup' && <label className="field"><span>Subteam</span><input required autoComplete="organization-title" value={subteam} onChange={(event) => setSubteam(event.target.value)} placeholder="e.g. Controls, Fabrication" /></label>}
         <label className="field"><span>Email address</span><input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>
         <label className="field"><span>Password</span><input required type="password" minLength={mode === 'signup' ? 12 : 1} autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === 'signup' ? 'At least 12 characters' : 'Your password'} /></label>
         {mode === 'signup' && <label className="field"><span>Team invite code</span><input required autoComplete="off" value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} placeholder="Provided by your team lead" /></label>}

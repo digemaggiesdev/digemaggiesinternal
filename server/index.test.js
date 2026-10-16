@@ -55,6 +55,7 @@ test('invite auth and shared records persist through the API', async () => {
 
   const account = {
     displayName: 'Test Member',
+    subteam: 'Controls',
     email: 'test-member@example.com',
     password: 'a-long-test-password',
     inviteCode: 'integration-test-invite',
@@ -75,9 +76,12 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify(account),
   })
   assert.equal(registration.status, 201)
+  assert.equal((await registration.clone().json()).user.subteam, account.subteam)
   const cookie = registration.headers.get('set-cookie')?.split(';')[0]
   assert.ok(cookie)
   assert.match(registration.headers.get('set-cookie'), /HttpOnly/i)
+  const sessionResponse = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
+  assert.equal((await sessionResponse.json()).user.subteam, account.subteam)
 
   const duplicate = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',

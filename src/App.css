@@ -68,7 +68,7 @@
 .status-pill { display: inline-flex; align-items: center; border-radius: 3px; padding: 4px 7px; color: #607269; background: #eff3ee; font-size: 9px; font-weight: 650; white-space: nowrap; }
 .status-pill.needed { color: #8b6234; background: #fbf3df; }
 .status-pill.outreach { color: #4f658d; background: #edf1fb; }
-.status-pill.in-progress { color: #53714a; background: #eff5e4; }
+.status-pill.in-transit { color: #53714a; background: #eff5e4; }
 .status-pill.received { color: #397153; background: #e8f4e9; }
 .status-pill.closed { color: #737d76; background: #f0f2ef; }
 .request-value { color: #40564a; text-align: right; font-size: 11px; font-weight: 650; white-space: nowrap; }

@@ -82,9 +82,9 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal(createdPart.status, 201)
   const { record: part } = await createdPart.json()
   const updatedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
-    method: 'PATCH', body: { status: 'Received' }, cookie,
+    method: 'PATCH', body: { status: 'In transit' }, cookie,
   }))
-  assert.equal((await updatedPart.json()).record.status, 'Received')
+  assert.equal((await updatedPart.json()).record.status, 'In transit')
   const listedParts = await handler(jsonRequest('/api/requests', { cookie }))
   assert.equal((await listedParts.json()).records[0].id, part.id)
   const deletedPart = await handler(jsonRequest(`/api/requests/${part.id}`, { method: 'DELETE', cookie }))

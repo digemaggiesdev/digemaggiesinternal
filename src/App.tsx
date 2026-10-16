@@ -31,6 +31,7 @@ import {
   signIn,
   signOut,
   signUp,
+  subteamOptions,
   updateRequest as updatePartRequest,
   updateSponsorLead,
   updateSponsor as updateSponsorship,
@@ -332,7 +333,7 @@ function App() {
           {view === 'parts' && <section className="section-block data-section">
             <div className="table-toolbar">
               <div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search item, company, subteam..." aria-label="Search part requests" /></div>
-              <label className="select-control"><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option><option>Needed</option><option>Outreach</option><option>In progress</option><option>Received</option><option>Closed</option></select><ChevronDown size={15} /></label>
+              <label className="select-control"><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select><ChevronDown size={15} /></label>
             </div>
             <div className="table-scroll"><table><thead><tr><th>PART / COMPANY</th><th>SUBTEAM</th><th>PRIORITY</th><th>COMPATIBILITY</th><th>COMMUNICATION</th><th>PART STATUS</th><th>VALUE</th><th>ACTIONS</th></tr></thead><tbody>
               {filteredRequests.map((request) => <tr key={request.id}>
@@ -340,7 +341,7 @@ function App() {
                 <td>{request.subteam}</td><td><span className={`priority-label ${request.priority.toLowerCase()}`}><span />{request.priority}</span></td>
                 <td className="compat-cell" title={request.compatibility}>{request.compatibility || 'Not provided'}</td>
                 <td><select className="inline-select" aria-label={`Communication status for ${request.item}`} value={request.communication} onChange={(event) => updateRequest(request.id, 'communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></td>
-                <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In progress</option><option>Received</option><option>Closed</option></select></td>
+                <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></td>
                 <td className="amount-cell">{money(request.value)}</td><td className="row-actions"><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></td>
               </tr>)}
               {filteredRequests.length === 0 && <tr><td colSpan={8} className="empty-table">No requests match this search.</td></tr>}
@@ -406,7 +407,7 @@ function RequestModal({ onClose, onSave }: { onClose: () => void; onSave: (reque
       <div className="form-grid">
         <label className="field"><span>Part or product <b>*</b></span><input required value={form.item} onChange={(event) => change('item', event.target.value)} placeholder="What does your team need?" /></label>
         <label className="field"><span>Company / entity</span><input value={form.company} onChange={(event) => change('company', event.target.value)} placeholder="Potential supplier or donor" /></label>
-        <label className="field"><span>Subteam <b>*</b></span><input required value={form.subteam} onChange={(event) => change('subteam', event.target.value)} placeholder="e.g. Controls" /></label>
+        <label className="field"><span>Subteam <b>*</b></span><select required value={form.subteam} onChange={(event) => change('subteam', event.target.value)}><option value="">Select a subteam</option>{subteamOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
         <label className="field"><span>Requested by</span><input value={form.requestedBy} onChange={(event) => change('requestedBy', event.target.value)} placeholder="Your name" /></label>
         <label className="field"><span>Product link</span><input type="url" value={form.link} onChange={(event) => change('link', event.target.value)} placeholder="https://" /></label>
         <label className="field"><span>Seller contact</span><input value={form.contact} onChange={(event) => change('contact', event.target.value)} placeholder="Name, email, or phone" /></label>
@@ -467,7 +468,7 @@ function SponsorLeadModal({ onClose, onSave }: { onClose: () => void; onSave: (l
         <label className="field"><span>Contact role</span><input value={form.contactRole} onChange={(event) => change('contactRole', event.target.value)} placeholder="Title or department" /></label>
         <label className="field"><span>Contact email</span><input type="email" value={form.contactEmail} onChange={(event) => change('contactEmail', event.target.value)} placeholder="name@company.com" /></label>
         <label className="field"><span>Contact phone</span><input type="tel" value={form.contactPhone} onChange={(event) => change('contactPhone', event.target.value)} placeholder="Optional" /></label>
-        <label className="field"><span>Your subteam</span><input value={form.subteam} onChange={(event) => change('subteam', event.target.value)} placeholder="e.g. Controls" /></label>
+        <label className="field"><span>Your subteam</span><select value={form.subteam} onChange={(event) => change('subteam', event.target.value)}><option value="">Select a subteam</option>{subteamOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
         <label className="field"><span>Estimated cash amount (USD)</span><input type="number" min="0" value={form.estimatedAmount} onChange={(event) => change('estimatedAmount', event.target.value)} placeholder="Optional; leave blank if unknown" /></label>
         <label className="field"><span>Can you introduce us?</span><select value={form.canIntroduce} onChange={(event) => change('canIntroduce', event.target.value as SponsorLeadInput['canIntroduce'])}><option>Not sure</option><option>Yes</option><option>No</option></select></label>
         <div className="field full-field"><span>What could they provide? <b>*</b></span><div className="support-options">{supportOptions.map((supportType) => <label className="support-option" key={supportType}><input type="checkbox" checked={form.supportTypes.includes(supportType)} onChange={() => toggleSupportType(supportType)} /><span>{supportType}</span></label>)}</div></div>

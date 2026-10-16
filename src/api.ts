@@ -1,8 +1,19 @@
-export type RequestStatus = 'Needed' | 'Outreach' | 'In progress' | 'Received' | 'Closed'
+export type RequestStatus = 'Needed' | 'Outreach' | 'In transit' | 'Received' | 'Closed'
 export type CommunicationStatus = 'Not started' | 'Contacted' | 'Follow-up' | 'Confirmed'
 export type SponsorStatus = 'Prospect' | 'Proposal sent' | 'Committed' | 'Received'
 export type SponsorLeadStatus = 'New' | 'Following up' | 'Contacted' | 'Converted' | 'Not pursuing'
 export type SponsorSupportType = 'Financial' | 'Parts / materials' | 'Equipment' | 'Services / expertise' | 'Other'
+
+export const subteamOptions = [
+  'Cutterhead/Chassis',
+  'Extraction',
+  'Propulsion',
+  'Tunnel Lining',
+  'Electronics',
+  'Software',
+  'Business',
+  'Integration',
+]
 
 export type TeamUser = {
   id: string

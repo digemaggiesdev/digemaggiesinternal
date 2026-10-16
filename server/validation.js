@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-const requestStatuses = ['Needed', 'Outreach', 'In progress', 'Received', 'Closed']
+const requestStatuses = ['Needed', 'Outreach', 'In transit', 'Received', 'Closed']
 const communicationStatuses = ['Not started', 'Contacted', 'Follow-up', 'Confirmed']
 const sponsorStatuses = ['Prospect', 'Proposal sent', 'Committed', 'Received']
 const sponsorLeadStatuses = ['New', 'Following up', 'Contacted', 'Converted', 'Not pursuing']

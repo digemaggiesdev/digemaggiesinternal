@@ -50,3 +50,9 @@ const userColumns = db.pragma('table_info(users)')
 if (!userColumns.some((column) => column.name === 'subteam')) {
   db.exec("ALTER TABLE users ADD COLUMN subteam TEXT NOT NULL DEFAULT ''")
 }
+
+db.prepare(`
+  UPDATE records
+  SET data = json_set(data, '$.status', ?), updated_at = ?
+  WHERE kind = ? AND json_extract(data, '$.status') = ?
+`).run('In transit', new Date().toISOString(), 'part_request', 'In progress')

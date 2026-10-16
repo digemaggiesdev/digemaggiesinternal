@@ -116,11 +116,11 @@ test('invite auth and shared records persist through the API', async () => {
   const updatedPartResponse = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
-    body: JSON.stringify({ status: 'Received' }),
+    body: JSON.stringify({ status: 'In transit' }),
   })
-  assert.equal((await updatedPartResponse.json()).record.status, 'Received')
+  assert.equal((await updatedPartResponse.json()).record.status, 'In transit')
   const listedParts = await fetch(`${baseUrl}/api/requests`, { headers: { Cookie: cookie } })
-  assert.equal((await listedParts.json()).records[0].status, 'Received')
+  assert.equal((await listedParts.json()).records[0].status, 'In transit')
 
   const sponsorInput = {
     company: 'Test Engineering Donor', contact: 'Test Contact', amount: 500, status: 'Committed',

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ArrowRight, LockKeyhole } from 'lucide-react'
+import { subteamOptions } from './api'
 import './AuthScreen.css'
 
 type AuthMode = 'signin' | 'signup'
@@ -49,7 +50,7 @@ export function AuthScreen({ onAuthenticate, initialError = '' }: AuthScreenProp
       <p className="auth-description">{mode === 'signin' ? 'Sign in to manage part requests and sponsor relationships.' : 'Create your team account with the invite code shared by your lead.'}</p>
       <form onSubmit={submit}>
         {mode === 'signup' && <label className="field"><span>Your name</span><input required autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Full name" /></label>}
-        {mode === 'signup' && <label className="field"><span>Subteam</span><input required autoComplete="organization-title" value={subteam} onChange={(event) => setSubteam(event.target.value)} placeholder="e.g. Controls, Fabrication" /></label>}
+        {mode === 'signup' && <label className="field"><span>Subteam</span><select required autoComplete="organization-title" value={subteam} onChange={(event) => setSubteam(event.target.value)}><option value="">Select a subteam</option>{subteamOptions.map((option) => <option key={option}>{option}</option>)}</select></label>}
         <label className="field"><span>Email address</span><input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>
         <label className="field"><span>Password</span><input required type="password" minLength={mode === 'signup' ? 12 : 1} autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === 'signup' ? 'At least 12 characters' : 'Your password'} /></label>
         {mode === 'signup' && <label className="field"><span>Team invite code</span><input required autoComplete="off" value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} placeholder="Provided by your team lead" /></label>}

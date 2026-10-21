@@ -3,6 +3,7 @@ export type CommunicationStatus = 'Not started' | 'Contacted' | 'Follow-up' | 'C
 export type SponsorStatus = 'Prospect' | 'Proposal sent' | 'Committed' | 'Received'
 export type SponsorLeadStatus = 'New' | 'Following up' | 'Contacted' | 'Converted' | 'Not pursuing'
 export type SponsorSupportType = 'Financial' | 'Parts / materials' | 'Equipment' | 'Services / expertise' | 'Other'
+export type DeliverableStatus = 'Not started' | 'In progress' | 'Completed'
 
 export const subteamOptions = [
   'Cutterhead/Chassis',
@@ -11,6 +12,7 @@ export const subteamOptions = [
   'Tunnel Lining',
   'Electronics',
   'Software',
+  'Exec',
   'Business',
   'Integration',
 ]
@@ -18,6 +20,12 @@ export const subteamOptions = [
 export type TeamUser = {
   id: string
   email: string
+  displayName: string
+  subteam: string
+}
+
+export type TeamMember = {
+  id: string
   displayName: string
   subteam: string
 }
@@ -39,11 +47,13 @@ export type PartRequest = {
   status: RequestStatus
   recurring: boolean
   requestedBy: string
+  requesterSubteam?: string
+  assigneeId?: string
   createdAt: string
   createdBy: string
 }
 
-export type PartRequestInput = Omit<PartRequest, 'id' | 'createdAt' | 'createdBy'>
+export type PartRequestInput = Omit<PartRequest, 'id' | 'createdAt' | 'createdBy' | 'requesterSubteam' | 'assigneeId'>
 
 export type Sponsor = {
   id: string
@@ -51,7 +61,7 @@ export type Sponsor = {
   contact: string
   amount: number
   status: SponsorStatus
-  deliverables: string[]
+  deliverables: { description: string; status: DeliverableStatus }[]
   relationship: string
   renewal: string
   createdAt: string
@@ -74,12 +84,14 @@ export type SponsorLead = {
   supportDetails: string
   estimatedAmount: number
   canIntroduce: 'Yes' | 'No' | 'Not sure'
+  requesterSubteam?: string
+  assigneeId?: string
   status: SponsorLeadStatus
   createdAt: string
   createdBy: string
 }
 
-export type SponsorLeadInput = Omit<SponsorLead, 'id' | 'status' | 'createdAt' | 'createdBy'>
+export type SponsorLeadInput = Omit<SponsorLead, 'id' | 'status' | 'createdAt' | 'createdBy' | 'requesterSubteam' | 'assigneeId'>
 
 export class ApiError extends Error {
   status: number
@@ -134,9 +146,29 @@ export async function signOut() {
   await request<void>('/api/auth/logout', { method: 'POST' })
 }
 
+export async function updateAccount(changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) {
+  const result = await request<{ user: TeamUser }>('/api/account', {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+  return result.user
+}
+
+export async function deleteAccount(password: string) {
+  await request<void>('/api/account', {
+    method: 'DELETE',
+    body: JSON.stringify({ password }),
+  })
+}
+
 export async function getRequests() {
   const result = await request<{ records: PartRequest[] }>('/api/requests')
   return result.records
+}
+
+export async function getTeamMembers() {
+  const result = await request<{ members: TeamMember[] }>('/api/team-members')
+  return result.members
 }
 
 export async function createRequest(input: PartRequestInput) {
@@ -147,7 +179,7 @@ export async function createRequest(input: PartRequestInput) {
   return result.record
 }
 
-export async function updateRequest(id: string, changes: Partial<Pick<PartRequest, 'status' | 'communication'>>) {
+export async function updateRequest(id: string, changes: Partial<Pick<PartRequest, 'status' | 'communication' | 'assigneeId'>>) {
   const result = await request<{ record: PartRequest }>(`/api/requests/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(changes),
@@ -172,12 +204,16 @@ export async function createSponsor(input: SponsorInput) {
   return result.record
 }
 
-export async function updateSponsor(id: string, status: SponsorStatus) {
+export async function updateSponsor(id: string, changes: Partial<SponsorInput>) {
   const result = await request<{ record: Sponsor }>(`/api/sponsorships/${encodeURIComponent(id)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(changes),
   })
   return result.record
+}
+
+export async function deleteSponsor(id: string) {
+  await request<void>(`/api/sponsorships/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export async function getSponsorLeads() {
@@ -193,10 +229,10 @@ export async function createSponsorLead(input: SponsorLeadInput) {
   return result.record
 }
 
-export async function updateSponsorLead(id: string, status: SponsorLeadStatus) {
+export async function updateSponsorLead(id: string, changes: Partial<Pick<SponsorLead, 'status' | 'assigneeId'>>) {
   const result = await request<{ record: SponsorLead }>(`/api/sponsor-leads/${encodeURIComponent(id)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(changes),
   })
   return result.record
 }

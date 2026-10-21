@@ -3,9 +3,17 @@ import { z } from 'zod'
 const requestStatuses = ['Needed', 'Outreach', 'In transit', 'Received', 'Closed']
 const communicationStatuses = ['Not started', 'Contacted', 'Follow-up', 'Confirmed']
 const sponsorStatuses = ['Prospect', 'Proposal sent', 'Committed', 'Received']
+const deliverableStatuses = ['Not started', 'In progress', 'Completed']
 const sponsorLeadStatuses = ['New', 'Following up', 'Contacted', 'Converted', 'Not pursuing']
 const sponsorSupportTypes = ['Financial', 'Parts / materials', 'Equipment', 'Services / expertise', 'Other']
 const optionalText = (max = 500) => z.string().trim().max(max).default('')
+const sponsorDeliverables = z.preprocess(
+  (value) => Array.isArray(value) ? value.map((deliverable) => typeof deliverable === 'string' ? { description: deliverable, status: 'Not started' } : deliverable) : value,
+  z.array(z.object({
+    description: z.string().trim().min(1).max(500),
+    status: z.enum(deliverableStatuses).default('Not started'),
+  })).max(20),
+)
 
 export const registerSchema = z.object({
   displayName: z.string().trim().min(2).max(100),
@@ -17,6 +25,16 @@ export const registerSchema = z.object({
 
 export const loginSchema = z.object({
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
+  password: z.string().min(1).max(128),
+})
+
+export const accountPatchSchema = z.object({
+  displayName: z.string().trim().min(2).max(100),
+  subteam: z.string().trim().min(1).max(100),
+  email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
+})
+
+export const accountDeleteSchema = z.object({
   password: z.string().min(1).max(128),
 })
 
@@ -41,21 +59,28 @@ export const partRequestSchema = z.object({
 export const partRequestPatchSchema = z.object({
   status: z.enum(requestStatuses).optional(),
   communication: z.enum(communicationStatuses).optional(),
-}).refine((value) => Object.keys(value).length > 0, 'Provide a status to update.')
+  assigneeId: z.string().trim().max(100).optional(),
+}).refine((value) => Object.keys(value).length > 0, 'Provide request details to update.')
 
 export const sponsorshipSchema = z.object({
   company: z.string().trim().min(1).max(200),
   contact: optionalText(300),
   amount: z.number().min(0).max(100000000),
   status: z.enum(sponsorStatuses),
-  deliverables: z.array(z.string().trim().min(1).max(500)).max(8),
+  deliverables: sponsorDeliverables,
   relationship: optionalText(2000),
   renewal: z.union([z.literal(''), z.string().regex(/^\d{4}-\d{2}-\d{2}$/)]).default(''),
 })
 
 export const sponsorshipPatchSchema = z.object({
-  status: z.enum(sponsorStatuses),
-})
+  company: z.string().trim().min(1).max(200).optional(),
+  contact: optionalText(300).optional(),
+  amount: z.number().min(0).max(100000000).optional(),
+  status: z.enum(sponsorStatuses).optional(),
+  deliverables: sponsorDeliverables.optional(),
+  relationship: optionalText(2000).optional(),
+  renewal: z.union([z.literal(''), z.string().regex(/^\d{4}-\d{2}-\d{2}$/)]).optional(),
+}).refine((value) => Object.keys(value).length > 0, 'Provide sponsorship details to update.')
 
 export const sponsorLeadSchema = z.object({
   company: z.string().trim().min(1).max(200),
@@ -73,5 +98,6 @@ export const sponsorLeadSchema = z.object({
 })
 
 export const sponsorLeadPatchSchema = z.object({
-  status: z.enum(sponsorLeadStatuses),
-})
+  status: z.enum(sponsorLeadStatuses).optional(),
+  assigneeId: z.string().trim().max(100).optional(),
+}).refine((value) => Object.keys(value).length > 0, 'Provide lead details to update.')

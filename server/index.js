@@ -6,6 +6,8 @@ import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 import { db } from './db.js'
 import {
+  accountDeleteSchema,
+  accountPatchSchema,
   loginSchema,
   partRequestPatchSchema,
   partRequestSchema,
@@ -106,7 +108,15 @@ function createRecord(kind, data) {
 }
 
 function listRecords(kind) {
-  return db.prepare('SELECT data FROM records WHERE kind = ? ORDER BY created_at DESC').all(kind).map((row) => JSON.parse(row.data))
+  return db.prepare('SELECT data FROM records WHERE kind = ? ORDER BY created_at DESC').all(kind).map((row) => {
+    const record = JSON.parse(row.data)
+    if (kind === 'sponsorship') {
+      record.deliverables = (record.deliverables || []).map((deliverable) => typeof deliverable === 'string'
+        ? { description: deliverable, status: 'Not started' }
+        : { ...deliverable, status: deliverable.status || 'Not started' })
+    }
+    return record
+  })
 }
 
 function updateRecord(kind, id, changes) {
@@ -137,6 +147,34 @@ function updateSponsorLead(id, changes) {
   db.prepare('UPDATE sponsor_leads SET data = ?, updated_at = ? WHERE id = ?')
     .run(JSON.stringify(record), new Date().toISOString(), id)
   return record
+}
+
+function canDelegate(user) {
+  return user.subteam.trim().toLowerCase() === 'exec'
+}
+
+function validateAssignee(res, assigneeId, requesterSubteam) {
+  if (!assigneeId) return true
+  const assignee = db.prepare('SELECT subteam FROM users WHERE id = ?').get(assigneeId)
+  const allowedSubteams = new Set(['business', requesterSubteam.trim().toLowerCase()])
+  if (!assignee || !allowedSubteams.has(assignee.subteam.trim().toLowerCase())) {
+    res.status(400).json({ error: 'Choose a member from the Business subteam or the requester’s subteam.' })
+    return false
+  }
+  return true
+}
+
+function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssigneeId) {
+  if (canDelegate(user)) return validateAssignee(res, assigneeId, requesterSubteam)
+  const subteam = user.subteam.trim().toLowerCase()
+  if (assigneeId === user.id && (subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase())) return true
+  if (!assigneeId && currentAssigneeId === user.id) return true
+  res.status(403).json({
+    error: assigneeId === user.id
+      ? 'Only Business members or members of the originating subteam can assign themselves.'
+      : 'Only Exec members can assign a task to another person.',
+  })
+  return false
 }
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
@@ -183,16 +221,64 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
 
 app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: req.user }))
 
+app.patch('/api/account', requireAuth, (req, res) => {
+  const input = parseBody(accountPatchSchema, req, res)
+  if (!input) return
+  try {
+    db.prepare('UPDATE users SET display_name = ?, email = ?, subteam = ? WHERE id = ?')
+      .run(input.displayName, input.email, input.subteam, req.user.id)
+    const updated = db.prepare('SELECT id, email, display_name, subteam FROM users WHERE id = ?').get(req.user.id)
+    res.json({ user: publicUser(updated) })
+  } catch (error) {
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
+    throw error
+  }
+})
+
+app.delete('/api/account', requireAuth, async (req, res, next) => {
+  const input = parseBody(accountDeleteSchema, req, res)
+  if (!input) return
+  try {
+    const account = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id)
+    if (!account || !(await passwordMatches(input.password, account.password_hash))) {
+      return res.status(401).json({ error: 'The password is incorrect.' })
+    }
+    const deleteAccountTransaction = db.transaction(() => {
+      db.prepare("UPDATE records SET data = json_remove(data, '$.assigneeId'), updated_at = ? WHERE json_extract(data, '$.assigneeId') = ?")
+        .run(new Date().toISOString(), req.user.id)
+      db.prepare("UPDATE sponsor_leads SET data = json_remove(data, '$.assigneeId'), updated_at = ? WHERE json_extract(data, '$.assigneeId') = ?")
+        .run(new Date().toISOString(), req.user.id)
+      db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id)
+    })
+    deleteAccountTransaction()
+    res.setHeader('Set-Cookie', 'digem_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
+    res.status(204).end()
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/team-members', requireAuth, (_req, res) => {
+  const members = db.prepare('SELECT id, display_name AS displayName, subteam FROM users ORDER BY display_name').all()
+  res.json({ members })
+})
+
 app.get('/api/requests', requireAuth, (_req, res) => res.json({ records: listRecords('part_request') }))
 app.post('/api/requests', requireAuth, (req, res) => {
   const input = parseBody(partRequestSchema, req, res)
   if (!input) return
-  const record = createRecord('part_request', { ...input, createdBy: req.user.displayName })
+  const record = createRecord('part_request', { ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
   res.status(201).json({ record })
 })
 app.patch('/api/requests/:id', requireAuth, (req, res) => {
   const input = parseBody(partRequestPatchSchema, req, res)
   if (!input) return
+  if (Object.hasOwn(input, 'assigneeId')) {
+    const existing = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(req.params.id, 'part_request')
+    if (!existing) return res.status(404).json({ error: 'Part request not found.' })
+    const record = JSON.parse(existing.data)
+    if (!authorizeAssignee(res, req.user, input.assigneeId, record.requesterSubteam || record.subteam, record.assigneeId)) return
+  }
   const record = updateRecord('part_request', req.params.id, input)
   if (!record) return res.status(404).json({ error: 'Part request not found.' })
   res.json({ record })
@@ -217,17 +303,28 @@ app.patch('/api/sponsorships/:id', requireAuth, (req, res) => {
   if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
   res.json({ record })
 })
+app.delete('/api/sponsorships/:id', requireAuth, (req, res) => {
+  const result = db.prepare('DELETE FROM records WHERE id = ? AND kind = ?').run(req.params.id, 'sponsorship')
+  if (!result.changes) return res.status(404).json({ error: 'Sponsorship not found.' })
+  res.status(204).end()
+})
 
 app.get('/api/sponsor-leads', requireAuth, (_req, res) => res.json({ records: listSponsorLeads() }))
 app.post('/api/sponsor-leads', requireAuth, (req, res) => {
   const input = parseBody(sponsorLeadSchema, req, res)
   if (!input) return
-  const record = createSponsorLead({ ...input, createdBy: req.user.displayName })
+  const record = createSponsorLead({ ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
   res.status(201).json({ record })
 })
 app.patch('/api/sponsor-leads/:id', requireAuth, (req, res) => {
   const input = parseBody(sponsorLeadPatchSchema, req, res)
   if (!input) return
+  if (Object.hasOwn(input, 'assigneeId')) {
+    const existing = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(req.params.id)
+    if (!existing) return res.status(404).json({ error: 'Sponsor lead not found.' })
+    const record = JSON.parse(existing.data)
+    if (!authorizeAssignee(res, req.user, input.assigneeId, record.requesterSubteam || record.subteam || '', record.assigneeId)) return
+  }
   const record = updateSponsorLead(req.params.id, input)
   if (!record) return res.status(404).json({ error: 'Sponsor lead not found.' })
   res.json({ record })

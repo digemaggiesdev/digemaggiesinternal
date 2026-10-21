@@ -2,6 +2,8 @@ import { getDatabase } from '@netlify/database'
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
 import {
+  accountDeleteSchema,
+  accountPatchSchema,
   loginSchema,
   partRequestPatchSchema,
   partRequestSchema,
@@ -111,7 +113,15 @@ async function listRecords(database, kind) {
   const rows = await database.sql`
     SELECT data FROM records WHERE kind = ${kind} ORDER BY created_at DESC
   `
-  return rows.map((row) => row.data)
+  return rows.map((row) => {
+    const record = row.data
+    if (kind === 'sponsorship') {
+      record.deliverables = (record.deliverables || []).map((deliverable) => typeof deliverable === 'string'
+        ? { description: deliverable, status: 'Not started' }
+        : { ...deliverable, status: deliverable.status || 'Not started' })
+    }
+    return record
+  })
 }
 
 async function createRecord(database, kind, data) {
@@ -159,6 +169,32 @@ async function updateSponsorLead(database, id, changes) {
     WHERE id = ${id}
   `
   return record
+}
+
+function canDelegate(user) {
+  return user.subteam.trim().toLowerCase() === 'exec'
+}
+
+async function isEligibleAssignee(database, assigneeId, requesterSubteam) {
+  if (!assigneeId) return true
+  const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId}`
+  const allowedSubteams = new Set(['business', requesterSubteam.trim().toLowerCase()])
+  return Boolean(member && allowedSubteams.has(member.subteam.trim().toLowerCase()))
+}
+
+async function assigneeAuthorizationError(database, user, assigneeId, requesterSubteam, currentAssigneeId) {
+  if (canDelegate(user)) {
+    return await isEligibleAssignee(database, assigneeId, requesterSubteam)
+      ? null
+      : { error: 'Choose a member from the Business subteam or the requester’s subteam.', status: 400 }
+  }
+  if (assigneeId === user.id) {
+    return await isEligibleAssignee(database, user.id, requesterSubteam)
+      ? null
+      : { error: 'Only Business members or members of the originating subteam can assign themselves.', status: 403 }
+  }
+  if (!assigneeId && currentAssigneeId === user.id) return null
+  return { error: 'Only Exec members can assign a task to another person.', status: 403 }
 }
 
 function getRouteId(path, prefix) {
@@ -248,13 +284,67 @@ export function createApiHandler(database, environment = process.env) {
         return new Response(null, { status: 204, headers: { 'Set-Cookie': setSessionCookie(request, '', 0) } })
       }
 
+      if (pathname === '/api/account' && method === 'PATCH') {
+        const parsed = await parseBody(request, accountPatchSchema)
+        if (parsed.response) return parsed.response
+        try {
+          const [updated] = await database.sql`
+            UPDATE users
+            SET display_name = ${parsed.data.displayName}, email = ${parsed.data.email}, subteam = ${parsed.data.subteam}
+            WHERE id = ${session.user.id}
+            RETURNING id, email, display_name, subteam
+          `
+          return Response.json({ user: publicUser(updated) })
+        } catch (error) {
+          if (error.code === '23505' || error.cause?.code === '23505') {
+            return jsonError('An account with that email already exists.', 409)
+          }
+          throw error
+        }
+      }
+      if (pathname === '/api/account' && method === 'DELETE') {
+        const parsed = await parseBody(request, accountDeleteSchema)
+        if (parsed.response) return parsed.response
+        const [account] = await database.sql`SELECT password_hash FROM users WHERE id = ${session.user.id}`
+        if (!account || !(await passwordMatches(parsed.data.password, account.password_hash))) {
+          return jsonError('The password is incorrect.', 401)
+        }
+        const client = await database.pool.connect()
+        try {
+          await client.query('BEGIN')
+          await client.query("UPDATE records SET data = data - 'assigneeId', updated_at = NOW() WHERE data->>'assigneeId' = $1", [session.user.id])
+          await client.query("UPDATE sponsor_leads SET data = data - 'assigneeId', updated_at = NOW() WHERE data->>'assigneeId' = $1", [session.user.id])
+          await client.query('DELETE FROM users WHERE id = $1', [session.user.id])
+          await client.query('COMMIT')
+          return new Response(null, { status: 204, headers: { 'Set-Cookie': setSessionCookie(request, '', 0) } })
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+      }
+
+      if (method === 'GET' && pathname === '/api/team-members') {
+        const members = await database.sql`SELECT id, display_name, subteam FROM users ORDER BY display_name`
+        return Response.json({ members: members.map((member) => ({
+          id: member.id,
+          displayName: member.display_name,
+          subteam: member.subteam || '',
+        })) })
+      }
+
       if (pathname === '/api/requests' && method === 'GET') {
         return Response.json({ records: await listRecords(database, 'part_request') })
       }
       if (pathname === '/api/requests' && method === 'POST') {
         const parsed = await parseBody(request, partRequestSchema)
         if (parsed.response) return parsed.response
-        const record = await createRecord(database, 'part_request', { ...parsed.data, createdBy: session.user.displayName })
+        const record = await createRecord(database, 'part_request', {
+          ...parsed.data,
+          requesterSubteam: session.user.subteam,
+          createdBy: session.user.displayName,
+        })
         return Response.json({ record }, { status: 201 })
       }
 
@@ -262,6 +352,13 @@ export function createApiHandler(database, environment = process.env) {
       if (requestId && method === 'PATCH') {
         const parsed = await parseBody(request, partRequestPatchSchema)
         if (parsed.response) return parsed.response
+        if (Object.hasOwn(parsed.data, 'assigneeId')) {
+          const [existing] = await database.sql`SELECT data FROM records WHERE id = ${requestId} AND kind = 'part_request'`
+          if (!existing) return jsonError('Part request not found.', 404)
+          const sourceSubteam = existing.data.requesterSubteam || existing.data.subteam || ''
+          const assignmentError = await assigneeAuthorizationError(database, session.user, parsed.data.assigneeId, sourceSubteam, existing.data.assigneeId)
+          if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+        }
         const record = await updateRecord(database, 'part_request', requestId, parsed.data)
         return record ? Response.json({ record }) : jsonError('Part request not found.', 404)
       }
@@ -287,6 +384,10 @@ export function createApiHandler(database, environment = process.env) {
         const record = await updateRecord(database, 'sponsorship', sponsorshipId, parsed.data)
         return record ? Response.json({ record }) : jsonError('Sponsorship not found.', 404)
       }
+      if (sponsorshipId && method === 'DELETE') {
+        const deleted = await database.sql`DELETE FROM records WHERE id = ${sponsorshipId} AND kind = 'sponsorship' RETURNING id`
+        return deleted.length ? new Response(null, { status: 204 }) : jsonError('Sponsorship not found.', 404)
+      }
 
       if (pathname === '/api/sponsor-leads' && method === 'GET') {
         return Response.json({ records: await listSponsorLeads(database) })
@@ -294,7 +395,11 @@ export function createApiHandler(database, environment = process.env) {
       if (pathname === '/api/sponsor-leads' && method === 'POST') {
         const parsed = await parseBody(request, sponsorLeadSchema)
         if (parsed.response) return parsed.response
-        const record = await createSponsorLead(database, { ...parsed.data, createdBy: session.user.displayName })
+        const record = await createSponsorLead(database, {
+          ...parsed.data,
+          requesterSubteam: session.user.subteam,
+          createdBy: session.user.displayName,
+        })
         return Response.json({ record }, { status: 201 })
       }
 
@@ -302,6 +407,13 @@ export function createApiHandler(database, environment = process.env) {
       if (sponsorLeadId && method === 'PATCH') {
         const parsed = await parseBody(request, sponsorLeadPatchSchema)
         if (parsed.response) return parsed.response
+        if (Object.hasOwn(parsed.data, 'assigneeId')) {
+          const [existing] = await database.sql`SELECT data FROM sponsor_leads WHERE id = ${sponsorLeadId}`
+          if (!existing) return jsonError('Sponsor lead not found.', 404)
+          const sourceSubteam = existing.data.requesterSubteam || existing.data.subteam || ''
+          const assignmentError = await assigneeAuthorizationError(database, session.user, parsed.data.assigneeId, sourceSubteam, existing.data.assigneeId)
+          if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+        }
         const record = await updateSponsorLead(database, sponsorLeadId, parsed.data)
         return record ? Response.json({ record }) : jsonError('Sponsor lead not found.', 404)
       }

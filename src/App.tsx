@@ -12,8 +12,10 @@ import {
   Eye,
   Handshake,
   LogOut,
+  Pencil,
   Plus,
   Search,
+  Settings,
   Trash2,
   X,
 } from 'lucide-react'
@@ -24,20 +26,25 @@ import {
   createRequest as createPartRequest,
   createSponsorLead,
   createSponsor as createSponsorship,
+  deleteSponsor as removeSponsor,
   getRequests,
   getSession,
   getSponsorLeads,
   getSponsors,
+  getTeamMembers,
+  deleteAccount,
   signIn,
   signOut,
   signUp,
   subteamOptions,
+  updateAccount,
   updateRequest as updatePartRequest,
   updateSponsorLead,
   updateSponsor as updateSponsorship,
 } from './api'
 import type {
   CommunicationStatus,
+  DeliverableStatus,
   PartRequest,
   PartRequestInput,
   RequestStatus,
@@ -47,22 +54,129 @@ import type {
   SponsorLeadStatus,
   SponsorInput,
   SponsorStatus,
+  TeamMember,
   TeamUser,
 } from './api'
 import './App.css'
 
-type View = 'overview' | 'parts' | 'sponsors' | 'sponsor-leads'
+type View = 'overview' | 'parts' | 'sponsors' | 'sponsor-leads' | 'account'
 
 function money(value: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value)
 }
 
-function downloadCsv(requests: PartRequest[], sponsors: Sponsor[], leads: SponsorLead[]) {
+function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, onChange }: {
+  assignedId?: string
+  user: TeamUser | null
+  members: TeamMember[]
+  requesterSubteam: string
+  label: string
+  onChange: (assigneeId: string) => void
+}) {
+  const eligibleMembers = members.filter((member) => {
+    const subteam = member.subteam.trim().toLowerCase()
+    return subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase()
+  })
+  const currentAssignee = members.find((member) => member.id === assignedId)
+  const isExec = user?.subteam.trim().toLowerCase() === 'exec'
+  const canAssignSelf = Boolean(user && (
+    user.subteam.trim().toLowerCase() === 'business'
+    || user.subteam.trim().toLowerCase() === requesterSubteam.trim().toLowerCase()
+  ))
+  const canEdit = Boolean(isExec || canAssignSelf)
+  const currentAssigneeLabel = currentAssignee
+    ? `${currentAssignee.displayName} · ${currentAssignee.subteam}`
+    : assignedId ? 'Assigned member' : 'Unassigned'
+
+  return <select
+    className="inline-select assignee-select"
+    aria-label={label}
+    value={assignedId || ''}
+    disabled={!canEdit}
+    onChange={(event) => onChange(event.target.value)}
+  >
+    {isExec
+      ? <>
+        <option value="">Unassigned</option>
+        {eligibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}</option>)}
+        {assignedId && !eligibleMembers.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
+      </>
+      : <>
+        <option value={assignedId || ''} disabled={Boolean(assignedId && assignedId !== user?.id)}>{currentAssigneeLabel}</option>
+        {canAssignSelf && user && assignedId !== user.id && <option value={user.id}>Assign to me ({user.displayName})</option>}
+      </>}
+  </select>
+}
+
+function AccountSettings({ user, onSave, onDelete }: {
+  user: TeamUser
+  onSave: (changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) => Promise<void>
+  onDelete: (password: string) => Promise<void>
+}) {
+  const [displayName, setDisplayName] = useState(user.displayName)
+  const [email, setEmail] = useState(user.email)
+  const [subteam, setSubteam] = useState(user.subteam)
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
+  const save = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setError('')
+    setSaving(true)
+    try {
+      await onSave({ displayName, email, subteam })
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not update your account.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const removeAccount = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setError('')
+    setDeleting(true)
+    try {
+      await onDelete(password)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not delete your account.')
+      setDeleting(false)
+    }
+  }
+
+  return <div className="account-settings">
+    <section className="section-block account-section">
+      <div className="section-heading"><div><span className="section-kicker">YOUR PROFILE</span><h2>Account information</h2></div></div>
+      <form onSubmit={(event) => void save(event)}>
+        <div className="form-grid">
+          <label className="field"><span>Name</span><input required minLength={2} maxLength={100} autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+          <label className="field"><span>Email address</span><input required type="email" maxLength={254} autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+          <label className="field"><span>Subteam</span><select required value={subteam} onChange={(event) => setSubteam(event.target.value)}>{!subteamOptions.includes(subteam) && <option value={subteam}>{subteam}</option>}{subteamOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
+        </div>
+        {error && <div className="action-error" role="alert">{error}</div>}
+        <div className="modal-actions"><button className="button primary" type="submit" disabled={saving}>{saving ? 'Saving...' : 'Save account information'}</button></div>
+      </form>
+    </section>
+    <section className="section-block account-section danger-section">
+      <div className="section-heading"><div><span className="section-kicker">PERMANENT ACTION</span><h2>Delete account</h2></div></div>
+      <p>Deleting your account signs you out and removes your profile. Requests and sponsor leads you submitted remain shared; any tasks assigned to you will become unassigned.</p>
+      <form onSubmit={(event) => void removeAccount(event)}>
+        <label className="field"><span>Confirm with your current password</span><input required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <div className="modal-actions"><button className="button danger-button" type="submit" disabled={deleting}>{deleting ? 'Deleting account...' : 'Delete my account'}</button></div>
+      </form>
+    </section>
+  </div>
+}
+
+function downloadCsv(requests: PartRequest[], sponsors: Sponsor[], leads: SponsorLead[], members: TeamMember[]) {
+  const memberNames = new Map(members.map((member) => [member.id, member.displayName]))
   const rows = [
-    ['Type', 'Company / entity', 'Item / contact', 'Contact info', 'Amount', 'Quantity', 'Subteam', 'Priority / status', 'Compatibility / relationship', 'Communication', 'Renewal / required specs'],
-    ...requests.map((request) => ['Part request', request.company, request.item, request.contact, request.value, request.quantity, request.subteam, `${request.priority} / ${request.status}`, request.compatibility, request.communication, request.specs]),
-    ...sponsors.map((sponsor) => ['Sponsorship', sponsor.company, sponsor.contact, '', sponsor.amount, '', '', sponsor.status, sponsor.relationship, '', `${sponsor.renewal} / ${sponsor.deliverables.join('; ')}`]),
-    ...leads.map((lead) => ['Sponsor lead', lead.company, lead.contactName, [lead.contactRole, lead.contactEmail, lead.contactPhone].filter(Boolean).join('; '), lead.estimatedAmount || '', '', lead.subteam, lead.status, lead.relationship, `Support: ${(lead.supportTypes || []).join(', ')}; can introduce: ${lead.canIntroduce}`, `${lead.supportDetails || ''} ${lead.details}`.trim()]),
+    ['Type', 'Company / entity', 'Item / contact', 'Contact info', 'Amount', 'Quantity', 'Subteam', 'Priority / status', 'Assigned to', 'Compatibility / relationship', 'Communication', 'Renewal / required specs'],
+    ...requests.map((request) => ['Part request', request.company, request.item, request.contact, request.value, request.quantity, request.subteam, `${request.priority} / ${request.status}`, memberNames.get(request.assigneeId || '') || '', request.compatibility, request.communication, request.specs]),
+    ...sponsors.map((sponsor) => ['Sponsorship', sponsor.company, sponsor.contact, '', sponsor.amount, '', '', sponsor.status, '', sponsor.relationship, '', `${sponsor.renewal} / ${sponsor.deliverables.map((deliverable) => `${deliverable.description} (${deliverable.status})`).join('; ')}`]),
+    ...leads.map((lead) => ['Sponsor lead', lead.company, lead.contactName, [lead.contactRole, lead.contactEmail, lead.contactPhone].filter(Boolean).join('; '), lead.estimatedAmount || '', '', lead.subteam, lead.status, memberNames.get(lead.assigneeId || '') || '', lead.relationship, `Support: ${(lead.supportTypes || []).join(', ')}; can introduce: ${lead.canIntroduce}`, `${lead.supportDetails || ''} ${lead.details}`.trim()]),
   ]
   const csv = rows.map((row) => row.map((cell) => {
     const safe = String(cell ?? '').replace(/^[=+\-@]/, "'$&")
@@ -80,12 +194,15 @@ function App() {
   const [requests, setRequests] = useState<PartRequest[]>([])
   const [sponsors, setSponsors] = useState<Sponsor[]>([])
   const [sponsorLeads, setSponsorLeads] = useState<SponsorLead[]>([])
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
   const [user, setUser] = useState<TeamUser | null>(null)
   const [authReady, setAuthReady] = useState(false)
   const [authError, setAuthError] = useState('')
   const [actionError, setActionError] = useState('')
   const [view, setView] = useState<View>('overview')
-  const [modal, setModal] = useState<'request' | 'sponsor' | 'lead' | 'lead-detail' | null>(null)
+  const [modal, setModal] = useState<'request' | 'lead' | 'lead-detail' | null>(null)
+  const [sponsorModal, setSponsorModal] = useState<'sponsor' | 'sponsor-edit' | 'sponsor-detail' | null>(null)
+  const [selectedSponsorId, setSelectedSponsorId] = useState<string | null>(null)
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('All statuses')
@@ -97,11 +214,12 @@ function App() {
       if (!active) return
       setUser(currentUser)
       if (currentUser) {
-        const [savedRequests, savedSponsors, savedLeads] = await Promise.all([getRequests(), getSponsors(), getSponsorLeads()])
+        const [savedRequests, savedSponsors, savedLeads, savedMembers] = await Promise.all([getRequests(), getSponsors(), getSponsorLeads(), getTeamMembers()])
         if (active) {
           setRequests(savedRequests)
           setSponsors(savedSponsors)
           setSponsorLeads(savedLeads)
+          setTeamMembers(savedMembers)
         }
       }
     }).catch((error: unknown) => {
@@ -113,10 +231,11 @@ function App() {
   }, [])
 
   const refreshWorkspace = async () => {
-    const [savedRequests, savedSponsors, savedLeads] = await Promise.all([getRequests(), getSponsors(), getSponsorLeads()])
+    const [savedRequests, savedSponsors, savedLeads, savedMembers] = await Promise.all([getRequests(), getSponsors(), getSponsorLeads(), getTeamMembers()])
     setRequests(savedRequests)
     setSponsors(savedSponsors)
     setSponsorLeads(savedLeads)
+    setTeamMembers(savedMembers)
   }
 
   const authenticate = async (values: AuthValues) => {
@@ -139,10 +258,30 @@ function App() {
       setRequests([])
       setSponsors([])
       setSponsorLeads([])
+      setTeamMembers([])
       setActionError('')
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not sign out.')
     }
+  }
+
+  const saveAccount = async (changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) => {
+    const updatedUser = await updateAccount(changes)
+    setUser(updatedUser)
+    setTeamMembers((current) => current.map((member) => member.id === updatedUser.id
+      ? { ...member, displayName: updatedUser.displayName, subteam: updatedUser.subteam }
+      : member))
+  }
+
+  const removeAccount = async (password: string) => {
+    await deleteAccount(password)
+    setUser(null)
+    setRequests([])
+    setSponsors([])
+    setSponsorLeads([])
+    setTeamMembers([])
+    setActionError('')
+    setAuthError('')
   }
 
   const openRequests = requests.filter((request) => !['Received', 'Closed'].includes(request.status))
@@ -157,6 +296,7 @@ function App() {
     return matchesQuery && (leadStatusFilter === 'All lead statuses' || lead.status === leadStatusFilter)
   })
   const selectedSponsorLead = sponsorLeads.find((lead) => lead.id === selectedLeadId) ?? null
+  const selectedSponsor = sponsors.find((sponsor) => sponsor.id === selectedSponsorId) ?? null
   const openSponsorLeadCount = sponsorLeads.filter((lead) => !['Converted', 'Not pursuing'].includes(lead.status)).length
 
   const addRequest = async (request: PartRequestInput) => {
@@ -175,9 +315,55 @@ function App() {
     try {
       const created = await createSponsorship(sponsor)
       setSponsors((current) => [created, ...current])
-      setModal(null)
+      setSponsorModal(null)
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not save this sponsor.')
+    }
+  }
+
+  const editSponsor = async (id: string, changes: SponsorInput) => {
+    setActionError('')
+    try {
+      const updated = await updateSponsorship(id, changes)
+      setSponsors((current) => current.map((sponsor) => sponsor.id === id ? updated : sponsor))
+      setSponsorModal(null)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not update this sponsor.')
+    }
+  }
+
+  const updateSponsorStatus = async (id: string, status: SponsorStatus) => {
+    try {
+      const updated = await updateSponsorship(id, { status })
+      setSponsors((current) => current.map((sponsor) => sponsor.id === id ? updated : sponsor))
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not update this sponsorship.')
+    }
+  }
+
+  const updateDeliverableStatus = async (sponsor: Sponsor, index: number, status: DeliverableStatus) => {
+    const deliverables = sponsor.deliverables.map((deliverable, deliverableIndex) => deliverableIndex === index
+      ? { ...deliverable, status }
+      : deliverable)
+    try {
+      const updated = await updateSponsorship(sponsor.id, { deliverables })
+      setSponsors((current) => current.map((item) => item.id === sponsor.id ? updated : item))
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not update this deliverable.')
+    }
+  }
+
+  const deleteSponsor = async (sponsor: Sponsor) => {
+    if (!window.confirm(`Delete the sponsorship for "${sponsor.company}"? This cannot be undone.`)) return
+    try {
+      await removeSponsor(sponsor.id)
+      setSponsors((current) => current.filter((item) => item.id !== sponsor.id))
+      setSponsorModal(null)
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not delete this sponsorship.')
     }
   }
 
@@ -203,24 +389,33 @@ function App() {
     }
   }
 
-  const updateSponsorStatus = async (id: string, status: SponsorStatus) => {
+  const updateRequestAssignee = async (id: string, assigneeId: string) => {
     try {
-      const updated = await updateSponsorship(id, status)
-      setSponsors((current) => current.map((sponsor) => sponsor.id === id ? updated : sponsor))
+      const updated = await updatePartRequest(id, { assigneeId })
+      setRequests((current) => current.map((request) => request.id === id ? updated : request))
       setActionError('')
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not update this sponsorship.')
+      setActionError(error instanceof Error ? error.message : 'Could not delegate this request.')
     }
   }
 
-
   const updateSponsorLeadStatus = async (id: string, status: SponsorLeadStatus) => {
     try {
-      const updated = await updateSponsorLead(id, status)
+      const updated = await updateSponsorLead(id, { status })
       setSponsorLeads((current) => current.map((lead) => lead.id === id ? updated : lead))
       setActionError('')
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not update this sponsor lead.')
+    }
+  }
+
+  const updateSponsorLeadAssignee = async (id: string, assigneeId: string) => {
+    try {
+      const updated = await updateSponsorLead(id, { assigneeId })
+      setSponsorLeads((current) => current.map((lead) => lead.id === id ? updated : lead))
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not delegate this sponsor lead.')
     }
   }
 
@@ -245,8 +440,8 @@ function App() {
       setActionError(error instanceof Error ? error.message : 'Could not delete this sponsor lead.')
     }
   }
-  const pageTitle = view === 'overview' ? 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : 'Sponsor leads'
-  const pageDescription = view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Requests submitted by subteams, from first ask to received.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : 'Potential sponsor connections submitted for the business team to follow up.'
+  const pageTitle = view === 'overview' ? 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : 'Account'
+  const pageDescription = view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Requests submitted by subteams, from first ask to received.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : 'Update your profile or permanently delete your account.'
   if (!authReady) return <main className="auth-shell"><div className="auth-panel auth-loading"><img className="auth-logo" src="https://digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" /><p>Connecting to the team workspace...</p></div></main>
   if (!user) return <AuthScreen onAuthenticate={authenticate} initialError={authError} />
 
@@ -262,12 +457,13 @@ function App() {
           <button className={view === 'parts' ? 'nav-item active' : 'nav-item'} onClick={() => setView('parts')}><Box size={18} /> Part requests <span className="nav-count">{openRequests.length}</span></button>
           <button className={view === 'sponsor-leads' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsor-leads')}><ContactRound size={18} /> Sponsor leads <span className="nav-count">{openSponsorLeadCount}</span></button>
           <button className={view === 'sponsors' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsors')}><Handshake size={18} /> Sponsorships</button>
+          <button className={view === 'account' ? 'nav-item active' : 'nav-item'} onClick={() => setView('account')}><Settings size={18} /> Account</button>
         </nav>
         <div className="sidebar-bottom">
           <div className="workspace-status"><span className="status-dot" /> Team workspace</div>
           <div className="workspace-user">{user.displayName} · {user.subteam || 'Subteam not set'}</div>
           <p>Requests and sponsorship records are shared with signed-in team members.</p>
-          <button className="sidebar-link" onClick={() => downloadCsv(requests, sponsors, sponsorLeads)}><ArrowDownToLine size={16} /> Export spreadsheet</button>
+          <button className="sidebar-link" onClick={() => downloadCsv(requests, sponsors, sponsorLeads, teamMembers)}><ArrowDownToLine size={16} /> Export spreadsheet</button>
         </div>
       </aside>
 
@@ -285,13 +481,15 @@ function App() {
               <p>{pageDescription}</p>
             </div>
             <div className="heading-actions">
-              {view === 'sponsors' && <button className="button secondary" onClick={() => setModal('sponsor')}><Plus size={17} /> Add sponsor</button>}
+              {view === 'sponsors' && <button className="button secondary" onClick={() => setSponsorModal('sponsor')}><Plus size={17} /> Add sponsor</button>}
               {view === 'sponsor-leads' && <button className="button primary" onClick={() => setModal('lead')}><Plus size={18} /> Submit sponsor lead</button>}
               {view === 'overview' && <button className="button secondary" onClick={() => setModal('lead')}><Plus size={17} /> Sponsor lead</button>}
-              {view !== 'sponsor-leads' && <button className="button primary" onClick={() => setModal('request')}><Plus size={18} /> New request</button>}
+              {view !== 'sponsor-leads' && view !== 'account' && <button className="button primary" onClick={() => setModal('request')}><Plus size={18} /> New request</button>}
             </div>
           </section>
           {actionError && <div className="action-error" role="alert">{actionError}</div>}
+
+          {view === 'account' && <AccountSettings key={user.id} user={user} onSave={saveAccount} onDelete={removeAccount} />}
 
           {view === 'overview' && <>
             <section className="metrics" aria-label="Workspace summary">
@@ -325,7 +523,7 @@ function App() {
                   </article>)}
                   {sponsors.length === 0 && <div className="empty-state">No sponsors yet. Add a prospect or record a commitment.</div>}
                 </div>
-                <button className="add-sponsor-link" onClick={() => setModal('sponsor')}><Plus size={16} /> Add sponsorship record</button>
+                <button className="add-sponsor-link" onClick={() => setSponsorModal('sponsor')}><Plus size={16} /> Add sponsorship record</button>
               </section>
             </div>
           </>}
@@ -335,29 +533,31 @@ function App() {
               <div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search item, company, subteam..." aria-label="Search part requests" /></div>
               <label className="select-control"><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select><ChevronDown size={15} /></label>
             </div>
-            <div className="table-scroll"><table><thead><tr><th>PART / COMPANY</th><th>SUBTEAM</th><th>PRIORITY</th><th>COMPATIBILITY</th><th>COMMUNICATION</th><th>PART STATUS</th><th>VALUE</th><th>ACTIONS</th></tr></thead><tbody>
+            <div className="table-scroll"><table><thead><tr><th>PART / COMPANY</th><th>SUBTEAM</th><th>PRIORITY</th><th>ASSIGNED TO</th><th>COMPATIBILITY</th><th>COMMUNICATION</th><th>PART STATUS</th><th>VALUE</th><th>ACTIONS</th></tr></thead><tbody>
               {filteredRequests.map((request) => <tr key={request.id}>
                 <td><div className="table-title">{request.link ? <a href={request.link} target="_blank" rel="noreferrer">{request.item} <ArrowUpRight size={12} /></a> : request.item}</div><div className="table-subtitle">{request.company} · {request.quantity} requested</div></td>
                 <td>{request.subteam}</td><td><span className={`priority-label ${request.priority.toLowerCase()}`}><span />{request.priority}</span></td>
+                <td><AssignmentSelect assignedId={request.assigneeId} user={user} members={teamMembers} requesterSubteam={request.requesterSubteam || request.subteam} label={`Assignment for request ${request.item}`} onChange={(assigneeId) => void updateRequestAssignee(request.id, assigneeId)} /></td>
                 <td className="compat-cell" title={request.compatibility}>{request.compatibility || 'Not provided'}</td>
                 <td><select className="inline-select" aria-label={`Communication status for ${request.item}`} value={request.communication} onChange={(event) => updateRequest(request.id, 'communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></td>
                 <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></td>
                 <td className="amount-cell">{money(request.value)}</td><td className="row-actions"><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></td>
               </tr>)}
-              {filteredRequests.length === 0 && <tr><td colSpan={8} className="empty-table">No requests match this search.</td></tr>}
+              {filteredRequests.length === 0 && <tr><td colSpan={9} className="empty-table">No requests match this search.</td></tr>}
             </tbody></table></div>
             <div className="table-footer">Showing {filteredRequests.length} of {requests.length} requests <span>Changes are shared with the team</span></div>
           </section>}
 
           {view === 'sponsors' && <section className="section-block data-section">
-            <div className="table-toolbar"><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search company or contact..." aria-label="Search sponsors" /></div><button className="button secondary" onClick={() => downloadCsv(requests, sponsors, sponsorLeads)}><ArrowDownToLine size={16} /> Export CSV</button></div>
-            <div className="table-scroll"><table><thead><tr><th>COMPANY / ENTITY</th><th>CONTACT</th><th>AMOUNT</th><th>STATUS</th><th>DELIVERABLES</th><th>RELATIONSHIP</th><th>RENEWAL</th></tr></thead><tbody>
+            <div className="table-toolbar"><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search company or contact..." aria-label="Search sponsors" /></div><button className="button secondary" onClick={() => downloadCsv(requests, sponsors, sponsorLeads, teamMembers)}><ArrowDownToLine size={16} /> Export CSV</button></div>
+            <div className="table-scroll"><table><thead><tr><th>COMPANY / ENTITY</th><th>CONTACT</th><th>AMOUNT</th><th>STATUS</th><th>DELIVERABLES</th><th>RELATIONSHIP</th><th>RENEWAL</th><th>ACTIONS</th></tr></thead><tbody>
               {filteredSponsors.map((sponsor) => <tr key={sponsor.id}>
-                <td><div className="table-title">{sponsor.company}</div><div className="table-subtitle">Sponsorship record</div></td><td>{sponsor.contact || 'Not provided'}</td><td className="amount-cell">{money(sponsor.amount)}</td>
+                <td><button type="button" className="sponsor-detail-trigger" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-detail') }}><span className="table-title">{sponsor.company}</span><span className="table-subtitle"><Eye size={12} /> View full sponsorship</span></button></td><td>{sponsor.contact || 'Not provided'}</td><td className="amount-cell">{money(sponsor.amount)}</td>
                 <td><select className="inline-select" aria-label={`Sponsorship status for ${sponsor.company}`} value={sponsor.status} onChange={(event) => updateSponsorStatus(sponsor.id, event.target.value as SponsorStatus)}><option>Prospect</option><option>Proposal sent</option><option>Committed</option><option>Received</option></select></td>
-                <td>{sponsor.deliverables.length ? `${sponsor.deliverables.length} agreed` : 'None listed'}</td><td>{sponsor.relationship}</td><td>{sponsor.renewal || 'Not set'}</td>
+                <td><button type="button" className="sponsor-deliverables-trigger" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-detail') }}>{sponsor.deliverables.length ? `${sponsor.deliverables.length} agreed` : 'View details'}</button></td><td>{sponsor.relationship}</td><td>{sponsor.renewal || 'Not set'}</td>
+                <td><button type="button" className="button secondary sponsor-row-edit" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-edit') }} aria-label={`Edit sponsorship details for ${sponsor.company}`}><Pencil size={14} /> Edit</button></td>
               </tr>)}
-              {filteredSponsors.length === 0 && <tr><td colSpan={7} className="empty-table">No sponsors match this search.</td></tr>}
+              {filteredSponsors.length === 0 && <tr><td colSpan={8} className="empty-table">No sponsors match this search.</td></tr>}
             </tbody></table></div>
             <div className="table-footer">Showing {filteredSponsors.length} of {sponsors.length} sponsorships <span>Track the promise as well as the amount</span></div>
           </section>}
@@ -376,6 +576,7 @@ function App() {
                   <span className="lead-summary-meta"><span>{lead.createdBy}{lead.subteam ? ` · ${lead.subteam}` : ''}</span><span>{lead.estimatedAmount ? `Cash: ${money(lead.estimatedAmount)}` : 'Cash estimate unknown'}</span></span>
                 </button>
                 <div className="lead-summary-tools">
+                  <AssignmentSelect assignedId={lead.assigneeId} user={user} members={teamMembers} requesterSubteam={lead.requesterSubteam || lead.subteam} label={`Assignment for sponsor lead ${lead.company}`} onChange={(assigneeId) => void updateSponsorLeadAssignee(lead.id, assigneeId)} />
                   <select className="inline-select lead-status-select" aria-label={`Follow-up status for ${lead.company}`} value={lead.status} onChange={(event) => void updateSponsorLeadStatus(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select>
                   <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button>
                 </div>
@@ -385,12 +586,14 @@ function App() {
             <div className="table-footer">Showing {filteredSponsorLeads.length} of {sponsorLeads.length} sponsor leads <span>New leads are shared with all signed-in members</span></div>
           </section>}
 
-          <footer className="page-footer"><span><Check size={14} /> Shared team records</span><button onClick={() => downloadCsv(requests, sponsors, sponsorLeads)}><ArrowDownToLine size={14} /> Download CSV</button></footer>
+          <footer className="page-footer"><span><Check size={14} /> Shared team records</span><button onClick={() => downloadCsv(requests, sponsors, sponsorLeads, teamMembers)}><ArrowDownToLine size={14} /> Download CSV</button></footer>
         </div>
       </main>
 
       {modal === 'request' && <RequestModal onClose={() => setModal(null)} onSave={addRequest} />}
-      {modal === 'sponsor' && <SponsorModal onClose={() => setModal(null)} onSave={addSponsor} />}
+      {sponsorModal === 'sponsor' && <SponsorModal onClose={() => setSponsorModal(null)} onSave={addSponsor} />}
+      {sponsorModal === 'sponsor-edit' && selectedSponsor && <SponsorModal sponsor={selectedSponsor} onClose={() => setSponsorModal('sponsor-detail')} onSave={(input) => editSponsor(selectedSponsor.id, input)} />}
+      {sponsorModal === 'sponsor-detail' && selectedSponsor && <SponsorDetailsModal sponsor={selectedSponsor} onClose={() => setSponsorModal(null)} onEdit={() => setSponsorModal('sponsor-edit')} onDelete={() => void deleteSponsor(selectedSponsor)} onDeliverableStatusChange={updateDeliverableStatus} />}
       {modal === 'lead' && <SponsorLeadModal onClose={() => setModal(null)} onSave={addSponsorLead} />}
       {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} onClose={() => setModal(null)} onStatusChange={updateSponsorLeadStatus} />}
     </div>
@@ -425,13 +628,23 @@ function RequestModal({ onClose, onSave }: { onClose: () => void; onSave: (reque
   </section></div>
 }
 
-function SponsorModal({ onClose, onSave }: { onClose: () => void; onSave: (sponsor: SponsorInput) => Promise<void> }) {
-  const [form, setForm] = useState({ company: '', contact: '', amount: '', status: 'Prospect' as SponsorStatus, relationship: '', renewal: '', deliverables: Array.from({ length: 8 }, () => '') })
-  const changeDeliverable = (index: number, value: string) => setForm((current) => ({ ...current, deliverables: current.deliverables.map((item, itemIndex) => itemIndex === index ? value : item) }))
+function SponsorModal({ sponsor, onClose, onSave }: { sponsor?: Sponsor; onClose: () => void; onSave: (sponsor: SponsorInput) => Promise<void> }) {
+  const [form, setForm] = useState({
+    company: sponsor?.company ?? '',
+    contact: sponsor?.contact ?? '',
+    amount: sponsor ? String(sponsor.amount) : '',
+    status: sponsor?.status ?? 'Prospect' as SponsorStatus,
+    relationship: sponsor?.relationship ?? '',
+    renewal: sponsor?.renewal ?? '',
+    deliverables: sponsor?.deliverables.length ? sponsor.deliverables.map((item) => ({ ...item })) : [{ description: '', status: 'Not started' as DeliverableStatus }],
+  })
+  const changeDeliverable = (index: number, value: string) => setForm((current) => ({ ...current, deliverables: current.deliverables.map((item, itemIndex) => itemIndex === index ? { ...item, description: value } : item) }))
+  const addDeliverable = () => setForm((current) => current.deliverables.length < 20 ? { ...current, deliverables: [...current.deliverables, { description: '', status: 'Not started' }] } : current)
+  const removeDeliverable = (index: number) => setForm((current) => ({ ...current, deliverables: current.deliverables.length > 1 ? current.deliverables.filter((_, itemIndex) => itemIndex !== index) : [{ description: '', status: 'Not started' }] }))
 
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal sponsor-modal" role="dialog" aria-modal="true" aria-labelledby="sponsor-title">
-    <div className="modal-heading"><div><span className="section-kicker">FUNDING PIPELINE</span><h2 id="sponsor-title">Add sponsorship</h2><p>Record the relationship, agreement, and what the team owes the donor.</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
-    <form onSubmit={(event) => { event.preventDefault(); onSave({ company: form.company, contact: form.contact, amount: Number(form.amount) || 0, status: form.status, relationship: form.relationship, renewal: form.renewal, deliverables: form.deliverables.filter((item) => item.trim()) }) }}>
+    <div className="modal-heading"><div><span className="section-kicker">FUNDING PIPELINE</span><h2 id="sponsor-title">{sponsor ? 'Edit sponsorship' : 'Add sponsorship'}</h2><p>Record the relationship, agreement, and what the team owes the donor.</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+    <form onSubmit={(event) => { event.preventDefault(); onSave({ company: form.company, contact: form.contact, amount: Number(form.amount) || 0, status: form.status, relationship: form.relationship, renewal: form.renewal, deliverables: form.deliverables.filter((item) => item.description.trim()) }) }}>
       <div className="form-grid">
         <label className="field"><span>Company / entity <b>*</b></span><input required value={form.company} onChange={(event) => setForm({ ...form, company: event.target.value })} placeholder="Organization name" /></label>
         <label className="field"><span>Contact info</span><input value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })} placeholder="Name, email, or phone" /></label>
@@ -440,10 +653,24 @@ function SponsorModal({ onClose, onSave }: { onClose: () => void; onSave: (spons
         <label className="field"><span>Relationship to donor</span><input value={form.relationship} onChange={(event) => setForm({ ...form, relationship: event.target.value })} placeholder="Who knows them, and how?" /></label>
         <label className="field"><span>Renewal / follow-up date</span><input type="date" value={form.renewal} onChange={(event) => setForm({ ...form, renewal: event.target.value })} /></label>
       </div>
-      <div className="deliverables-heading"><div><strong>Agreed deliverables</strong><span>List up to 8 commitments to the sponsor.</span></div><span>OPTIONAL</span></div>
-      <div className="deliverables-grid">{form.deliverables.map((deliverable, index) => <label className="field" key={index}><span>Deliverable {index + 1}</span><input value={deliverable} onChange={(event) => changeDeliverable(index, event.target.value)} placeholder={index === 0 ? 'e.g. Logo placement' : 'Add commitment'} /></label>)}</div>
-      <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary"><Plus size={16} /> Save sponsor</button></div>
+      <div className="deliverables-heading"><div><strong>Agreed deliverables</strong><span>Add up to 20 commitments to the sponsor.</span></div><button type="button" className="icon-button add-deliverable-button" onClick={addDeliverable} disabled={form.deliverables.length >= 20} aria-label="Add deliverable" title="Add deliverable"><Plus size={17} /></button></div>
+      <div className="deliverables-grid">{form.deliverables.map((deliverable, index) => <div className="deliverable-field" key={index}><label className="field"><span>Deliverable {index + 1}</span><input value={deliverable.description} onChange={(event) => changeDeliverable(index, event.target.value)} placeholder="e.g. Logo placement" /></label>{form.deliverables.length > 1 && <button type="button" className="icon-button remove-deliverable-button" onClick={() => removeDeliverable(index)} aria-label={`Remove deliverable ${index + 1}`} title={`Remove deliverable ${index + 1}`}><X size={15} /></button>}</div>)}</div>
+      <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary"><Plus size={16} /> {sponsor ? 'Save changes' : 'Save sponsor'}</button></div>
     </form>
+  </section></div>
+}
+
+function SponsorDetailsModal({ sponsor, onClose, onEdit, onDelete, onDeliverableStatusChange }: { sponsor: Sponsor; onClose: () => void; onEdit: () => void; onDelete: () => void; onDeliverableStatusChange: (sponsor: Sponsor, index: number, status: DeliverableStatus) => Promise<void> }) {
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="sponsor-details-title">
+    <div className="modal-heading"><div><span className="section-kicker">FULL SPONSORSHIP RECORD</span><h2 id="sponsor-details-title">{sponsor.company}</h2><p>Added by {sponsor.createdBy} · {sponsor.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+    <div className="lead-details-content">
+      <section className="lead-details-section"><h3>Agreement</h3><p>{sponsor.status} · {money(sponsor.amount)}</p></section>
+      <section className="lead-details-section"><h3>Contact</h3><p>{sponsor.contact || 'No contact provided'}</p></section>
+      <section className="lead-details-section"><h3>Agreed deliverables ({sponsor.deliverables.length})</h3>{sponsor.deliverables.length ? <ul className="sponsor-deliverables-list">{sponsor.deliverables.map((deliverable, index) => <li key={`${deliverable.description}-${index}`}><span>{deliverable.description}</span><select className="inline-select deliverable-status-select" aria-label={`Tracking status for ${deliverable.description}`} value={deliverable.status} onChange={(event) => void onDeliverableStatusChange(sponsor, index, event.target.value as DeliverableStatus)}><option>Not started</option><option>In progress</option><option>Completed</option></select></li>)}</ul> : <p>No deliverables listed.</p>}</section>
+      <section className="lead-details-section"><h3>Relationship</h3><p>{sponsor.relationship || 'No relationship details provided.'}</p></section>
+      <section className="lead-details-section"><h3>Renewal / follow-up</h3><p>{sponsor.renewal || 'Not set'}</p></section>
+    </div>
+    <div className="modal-actions sponsor-detail-actions"><button type="button" className="button secondary delete-sponsor-button" onClick={onDelete}><Trash2 size={15} /> Delete sponsorship</button><button type="button" className="button secondary" onClick={onClose}>Close</button><button type="button" className="button primary" onClick={onEdit}>Edit sponsorship</button></div>
   </section></div>
 }
 

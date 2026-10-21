@@ -76,7 +76,8 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify(account),
   })
   assert.equal(registration.status, 201)
-  assert.equal((await registration.clone().json()).user.subteam, account.subteam)
+  const accountUser = (await registration.clone().json()).user
+  assert.equal(accountUser.subteam, account.subteam)
   const cookie = registration.headers.get('set-cookie')?.split(';')[0]
   assert.ok(cookie)
   assert.match(registration.headers.get('set-cookie'), /HttpOnly/i)
@@ -112,6 +113,27 @@ test('invite auth and shared records persist through the API', async () => {
   assert.equal(createdPartResponse.status, 201)
   const { record: part } = await createdPartResponse.json()
   assert.equal(part.createdBy, account.displayName)
+  assert.equal(part.requesterSubteam, account.subteam)
+
+  const businessAccount = {
+    ...account,
+    displayName: 'Business Member',
+    subteam: 'Business',
+    email: 'business-member@example.com',
+  }
+  const businessRegistration = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(businessAccount),
+  })
+  assert.equal(businessRegistration.status, 201)
+  const businessUser = (await businessRegistration.clone().json()).user
+  const businessCookie = businessRegistration.headers.get('set-cookie')?.split(';')[0]
+  const teamMembersResponse = await fetch(`${baseUrl}/api/team-members`, { headers: { Cookie: cookie } })
+  const { members } = await teamMembersResponse.json()
+  assert.ok(members.some((member) => member.id === businessUser.id))
+  assert.ok(members.some((member) => member.displayName === businessAccount.displayName && member.subteam === 'Business'))
+  assert.ok(members.every((member) => !Object.hasOwn(member, 'email')))
 
   const updatedPartResponse = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
@@ -119,6 +141,57 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ status: 'In transit' }),
   })
   assert.equal((await updatedPartResponse.json()).record.status, 'In transit')
+  const unauthorizedAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ assigneeId: 'not-a-member' }),
+  })
+  assert.equal(unauthorizedAssignment.status, 403)
+  const selfAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ assigneeId: accountUser.id }),
+  })
+  assert.equal((await selfAssignment.json()).record.assigneeId, accountUser.id)
+  const nonExecAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ assigneeId: businessUser.id }),
+  })
+  assert.equal(nonExecAssignment.status, 403)
+  const businessAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: businessCookie },
+    body: JSON.stringify({ assigneeId: businessUser.id }),
+  })
+  assert.equal((await businessAssignment.json()).record.assigneeId, businessUser.id)
+  const businessCannotAssignOthers = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: businessCookie },
+    body: JSON.stringify({ assigneeId: accountUser.id }),
+  })
+  assert.equal(businessCannotAssignOthers.status, 403)
+  const execAccount = { ...account, displayName: 'Exec Member', subteam: 'Exec', email: 'exec-member@example.com' }
+  const execRegistration = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(execAccount),
+  })
+  assert.equal(execRegistration.status, 201)
+  const execUser = (await execRegistration.clone().json()).user
+  const execCookie = execRegistration.headers.get('set-cookie')?.split(';')[0]
+  const execAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ assigneeId: accountUser.id }),
+  })
+  assert.equal((await execAssignment.json()).record.assigneeId, accountUser.id)
+  const invalidTargetAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ assigneeId: execUser.id }),
+  })
+  assert.equal(invalidTargetAssignment.status, 400)
   const listedParts = await fetch(`${baseUrl}/api/requests`, { headers: { Cookie: cookie } })
   assert.equal((await listedParts.json()).records[0].status, 'In transit')
 
@@ -133,6 +206,7 @@ test('invite auth and shared records persist through the API', async () => {
   })
   assert.equal(createdSponsorResponse.status, 201)
   const { record: sponsor } = await createdSponsorResponse.json()
+  assert.deepEqual(sponsor.deliverables, [{ description: 'Demo invitation', status: 'Not started' }])
 
   const sponsorUpdate = await fetch(`${baseUrl}/api/sponsorships/${sponsor.id}`, {
     method: 'PATCH',
@@ -140,8 +214,33 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ status: 'Received' }),
   })
   assert.equal((await sponsorUpdate.json()).record.status, 'Received')
+  const sponsorEdit = await fetch(`${baseUrl}/api/sponsorships/${sponsor.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ ...sponsorInput, company: 'Edited Test Sponsor', deliverables: ['Logo placement', 'Demo invitation'] }),
+  })
+  const { record: editedSponsor } = await sponsorEdit.json()
+  assert.equal(editedSponsor.company, 'Edited Test Sponsor')
+  assert.deepEqual(editedSponsor.deliverables, [
+    { description: 'Logo placement', status: 'Not started' },
+    { description: 'Demo invitation', status: 'Not started' },
+  ])
+  const sponsorDeliveryStatus = await fetch(`${baseUrl}/api/sponsorships/${sponsor.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({
+      deliverables: [
+        { description: 'Logo placement', status: 'Completed' },
+        { description: 'Demo invitation', status: 'In progress' },
+      ],
+    }),
+  })
+  assert.deepEqual((await sponsorDeliveryStatus.json()).record.deliverables, [
+    { description: 'Logo placement', status: 'Completed' },
+    { description: 'Demo invitation', status: 'In progress' },
+  ])
   const listedSponsors = await fetch(`${baseUrl}/api/sponsorships`, { headers: { Cookie: cookie } })
-  assert.equal((await listedSponsors.json()).records[0].company, sponsorInput.company)
+  assert.equal((await listedSponsors.json()).records[0].company, 'Edited Test Sponsor')
 
   const teammateRegistration = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
@@ -152,12 +251,12 @@ test('invite auth and shared records persist through the API', async () => {
   const teammateCookie = teammateRegistration.headers.get('set-cookie')?.split(';')[0]
   const sharedParts = await fetch(`${baseUrl}/api/requests`, { headers: { Cookie: teammateCookie } })
   assert.equal((await sharedParts.json()).records[0].item, partInput.item)
-  const deletedPart = await fetch(`${baseUrl}/api/requests/${part.id}`, { method: 'DELETE', headers: { Cookie: cookie } })
-  assert.equal(deletedPart.status, 204)
-  const partsAfterDelete = await fetch(`${baseUrl}/api/requests`, { headers: { Cookie: cookie } })
-  assert.equal((await partsAfterDelete.json()).records.some((record) => record.id === part.id), false)
   const sharedSponsors = await fetch(`${baseUrl}/api/sponsorships`, { headers: { Cookie: teammateCookie } })
-  assert.equal((await sharedSponsors.json()).records[0].company, sponsorInput.company)
+  assert.equal((await sharedSponsors.json()).records[0].company, 'Edited Test Sponsor')
+  const deletedSponsor = await fetch(`${baseUrl}/api/sponsorships/${sponsor.id}`, { method: 'DELETE', headers: { Cookie: cookie } })
+  assert.equal(deletedSponsor.status, 204)
+  const sponsorsAfterDelete = await fetch(`${baseUrl}/api/sponsorships`, { headers: { Cookie: cookie } })
+  assert.equal((await sponsorsAfterDelete.json()).records.some((record) => record.id === sponsor.id), false)
 
   const sponsorLeadInput = {
     company: 'Test Potential Sponsor', contactName: 'Jordan Contact', contactRole: 'Engineering Manager',
@@ -174,8 +273,39 @@ test('invite auth and shared records persist through the API', async () => {
   assert.equal(createdLeadResponse.status, 201)
   const { record: lead } = await createdLeadResponse.json()
   assert.equal(lead.createdBy, account.displayName)
+  assert.equal(lead.requesterSubteam, account.subteam)
   assert.equal(lead.status, 'New')
   assert.deepEqual(lead.supportTypes, sponsorLeadInput.supportTypes)
+  const selfAssignedLeadResponse = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ assigneeId: accountUser.id }),
+  })
+  assert.equal((await selfAssignedLeadResponse.json()).record.assigneeId, accountUser.id)
+  const nonExecLeadAssignment = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ assigneeId: businessUser.id }),
+  })
+  assert.equal(nonExecLeadAssignment.status, 403)
+  const assignedLeadResponse = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: businessCookie },
+    body: JSON.stringify({ assigneeId: businessUser.id }),
+  })
+  assert.equal((await assignedLeadResponse.json()).record.assigneeId, businessUser.id)
+  const businessCannotAssignLeadToOthers = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: businessCookie },
+    body: JSON.stringify({ assigneeId: accountUser.id }),
+  })
+  assert.equal(businessCannotAssignLeadToOthers.status, 403)
+  const execAssignsLead = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ assigneeId: accountUser.id }),
+  })
+  assert.equal((await execAssignsLead.json()).record.assigneeId, accountUser.id)
   const leadStatusResponse = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
@@ -184,13 +314,52 @@ test('invite auth and shared records persist through the API', async () => {
   assert.equal((await leadStatusResponse.json()).record.status, 'Following up')
   const sharedLeads = await fetch(`${baseUrl}/api/sponsor-leads`, { headers: { Cookie: teammateCookie } })
   assert.equal((await sharedLeads.json()).records[0].company, sponsorLeadInput.company)
-  const deletedLead = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, { method: 'DELETE', headers: { Cookie: cookie } })
-  assert.equal(deletedLead.status, 204)
-  const leadsAfterDelete = await fetch(`${baseUrl}/api/sponsor-leads`, { headers: { Cookie: cookie } })
-  assert.equal((await leadsAfterDelete.json()).records.some((record) => record.id === lead.id), false)
+  const accountUpdate = await fetch(`${baseUrl}/api/account`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ displayName: 'Updated Test Member', email: 'updated-test-member@example.com', subteam: account.subteam }),
+  })
+  assert.deepEqual((await accountUpdate.json()).user, {
+    id: accountUser.id,
+    email: 'updated-test-member@example.com',
+    displayName: 'Updated Test Member',
+    subteam: account.subteam,
+  })
+  const updatedSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
+  assert.equal((await updatedSession.json()).user.displayName, 'Updated Test Member')
+  const duplicateEmail = await fetch(`${baseUrl}/api/account`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ displayName: 'Updated Test Member', email: 'business-member@example.com', subteam: account.subteam }),
+  })
+  assert.equal(duplicateEmail.status, 409)
+  const rejectedDeletion = await fetch(`${baseUrl}/api/account`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ password: 'incorrect-password' }),
+  })
+  assert.equal(rejectedDeletion.status, 401)
+  const accountDeletion = await fetch(`${baseUrl}/api/account`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ password: account.password }),
+  })
+  assert.equal(accountDeletion.status, 204)
+  const deletedAccountSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
+  assert.equal(deletedAccountSession.status, 401)
 
-  const logout = await fetch(`${baseUrl}/api/auth/logout`, { method: 'POST', headers: { Cookie: cookie } })
-  assert.equal(logout.status, 204)
-  const loggedOut = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
-  assert.equal(loggedOut.status, 401)
+  const remainingParts = await fetch(`${baseUrl}/api/requests`, { headers: { Cookie: teammateCookie } })
+  const remainingPart = (await remainingParts.json()).records.find((record) => record.id === part.id)
+  assert.ok(remainingPart)
+  assert.equal(remainingPart.assigneeId, undefined)
+  const remainingLeads = await fetch(`${baseUrl}/api/sponsor-leads`, { headers: { Cookie: teammateCookie } })
+  const remainingLead = (await remainingLeads.json()).records.find((record) => record.id === lead.id)
+  assert.ok(remainingLead)
+  assert.equal(remainingLead.assigneeId, undefined)
+  const teamMembersAfterDeletion = await fetch(`${baseUrl}/api/team-members`, { headers: { Cookie: teammateCookie } })
+  assert.equal((await teamMembersAfterDeletion.json()).members.some((member) => member.id === accountUser.id), false)
+  const deletedPart = await fetch(`${baseUrl}/api/requests/${part.id}`, { method: 'DELETE', headers: { Cookie: teammateCookie } })
+  assert.equal(deletedPart.status, 204)
+  const deletedLead = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, { method: 'DELETE', headers: { Cookie: teammateCookie } })
+  assert.equal(deletedLead.status, 204)
 })

@@ -34,7 +34,8 @@ Production sign-in, part requests, sponsor leads, and sponsorship records are ha
 ## Data and access
 
 - New member accounts require an invite code and record the member's subteam. Passwords are stored as salted, derived hashes; sessions expire after seven days.
-- Any signed-in team member can read and update the shared requests, sponsor leads, and sponsorships. There are no role-based permissions or password-reset flow yet.
+- Signed-in members can update their account name, email, and subteam from the Account page. Account deletion requires the current password, removes the profile, and unassigns their tasks while preserving shared records.
+- Any signed-in team member can read and update shared requests, sponsor leads, and sponsorships. Everyone can see task assignments; Business members and members of the original requester's subteam can assign themselves, while only Exec members can assign a task to another eligible person. Eligible assignees belong to the Business subteam or the original requester's subteam. There is no password-reset flow yet.
 - Members can delete part requests and sponsor leads after confirming; sponsorship records remain separate.
 - Sponsor leads can include multiple support types: financial contributions, parts and materials, equipment, services or expertise, and other offers. The cash estimate is optional.
 - CSV export opens in Excel or Google Sheets, but it is a snapshot rather than live spreadsheet synchronization.

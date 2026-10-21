@@ -74,11 +74,9 @@ export const partRequestSchema = z.object({
 export const managementPartRequestPatchSchema = partRequestSchema.partial().strict()
   .refine((value) => Object.keys(value).length > 0, 'Provide request details to update.')
 
-export const partRequestPatchSchema = z.object({
-  status: z.enum(requestStatuses).optional(),
-  communication: z.enum(communicationStatuses).optional(),
+export const partRequestPatchSchema = partRequestSchema.partial().extend({
   assigneeId: z.string().trim().max(100).optional(),
-}).refine((value) => Object.keys(value).length > 0, 'Provide request details to update.')
+}).strict().refine((value) => Object.keys(value).length > 0, 'Provide request details to update.')
 
 export const sponsorshipSchema = z.object({
   company: z.string().trim().min(1).max(200),
@@ -120,7 +118,4 @@ export const managementSponsorLeadPatchSchema = sponsorLeadSchema.partial().exte
   assigneeId: z.string().trim().max(100).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, 'Provide sponsor lead details to update.')
 
-export const sponsorLeadPatchSchema = z.object({
-  status: z.enum(sponsorLeadStatuses).optional(),
-  assigneeId: z.string().trim().max(100).optional(),
-}).refine((value) => Object.keys(value).length > 0, 'Provide lead details to update.')
+export const sponsorLeadPatchSchema = managementSponsorLeadPatchSchema

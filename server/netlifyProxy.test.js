@@ -167,6 +167,15 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal(createdPart.status, 201)
   const { record: part } = await createdPart.json()
   assert.equal(part.requesterSubteam, loginResult.user.subteam)
+  const devSelfAssignment = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { assigneeId: devUser.id }, cookie: devCookie,
+  }))
+  assert.equal((await devSelfAssignment.json()).record.assigneeId, devUser.id)
+  const memberPartEdit = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { specs: 'Updated by a regular member', compatibility: 'Verified against the build' }, cookie,
+  }))
+  assert.equal(memberPartEdit.status, 200)
+  assert.equal((await memberPartEdit.json()).record.specs, 'Updated by a regular member')
   const selfAssignedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: requester.id }, cookie,
   }))
@@ -191,8 +200,12 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
     method: 'PATCH', body: { assigneeId: requester.id }, cookie: execCookie,
   }))
   assert.equal((await execAssignedPart.json()).record.assigneeId, requester.id)
-  const ineligibleExecTarget = await handler(jsonRequest(`/api/requests/${part.id}`, {
+  const execSelfAssignment = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: execUser.id }, cookie: execCookie,
+  }))
+  assert.equal((await execSelfAssignment.json()).record.assigneeId, execUser.id)
+  const ineligibleExecTarget = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { assigneeId: 'missing-target' }, cookie: execCookie,
   }))
   assert.equal(ineligibleExecTarget.status, 400)
   const updatedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
@@ -257,6 +270,11 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const { record } = await created.json()
   assert.equal(record.createdBy, 'Netlify Test Member')
   assert.equal(record.requesterSubteam, loginResult.user.subteam)
+  const memberLeadEdit = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
+    method: 'PATCH', body: { details: 'Updated by a regular member', estimatedAmount: 250 }, cookie,
+  }))
+  assert.equal(memberLeadEdit.status, 200)
+  assert.equal((await memberLeadEdit.json()).record.details, 'Updated by a regular member')
   const selfAssignedLead = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
     method: 'PATCH', body: { assigneeId: requester.id }, cookie,
   }))

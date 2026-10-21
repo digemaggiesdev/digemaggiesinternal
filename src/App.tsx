@@ -46,9 +46,7 @@ import {
   signUp,
   subteamOptions,
   updateAccount,
-  updateManagementRequest,
   updateManagementSponsor,
-  updateManagementSponsorLead,
   updateManagementUser,
   updateRequest as updatePartRequest,
   updateSponsorLead,
@@ -93,7 +91,7 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
 }) {
   const eligibleMembers = members.filter((member) => {
     const subteam = member.subteam.trim().toLowerCase()
-    return user?.tag === 'dev' || subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase()
+    return member.id === user?.id || user?.tag === 'dev' || subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase()
   })
   const currentAssignee = members.find((member) => member.id === assignedId)
   const isExec = user?.tag === 'dev' || user?.subteam.trim().toLowerCase() === 'exec'
@@ -116,7 +114,7 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
     {isExec
       ? <>
         <option value="">Unassigned</option>
-        {eligibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}</option>)}
+        {eligibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}{member.id === user?.id ? ' (You)' : ''}</option>)}
         {assignedId && !eligibleMembers.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
       </>
       : <>
@@ -416,6 +414,7 @@ function App() {
   const [managementEdit, setManagementEdit] = useState<ManagementEdit | null>(null)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('All statuses')
+  const [subteamFilter, setSubteamFilter] = useState('')
   const [requestSort, setRequestSort] = useState<'newest' | 'urgency'>('newest')
   const [leadStatusFilter, setLeadStatusFilter] = useState('All lead statuses')
 
@@ -539,7 +538,7 @@ function App() {
 
   const editManagementRequest = async (id: string, changes: PartRequestInput) => {
     try {
-      const updated = await updateManagementRequest(id, changes)
+      const updated = await updatePartRequest(id, changes)
       setRequests((current) => current.map((request) => request.id === id ? updated : request))
       setManagementEdit(null)
       setActionError('')
@@ -561,7 +560,7 @@ function App() {
 
   const editManagementLead = async (id: string, changes: SponsorLeadInput & { status?: SponsorLeadStatus }) => {
     try {
-      const updated = await updateManagementSponsorLead(id, changes)
+      const updated = await updateSponsorLead(id, changes)
       setSponsorLeads((current) => current.map((lead) => lead.id === id ? updated : lead))
       setManagementEdit(null)
       setActionError('')
@@ -609,9 +608,12 @@ function App() {
 
   const openRequests = requests.filter((request) => !['Received', 'Closed'].includes(request.status))
   const activeValue = sponsors.filter((sponsor) => sponsor.status === 'Committed' || sponsor.status === 'Received').reduce((sum, sponsor) => sum + sponsor.amount, 0)
+  const requestSubteams = [...new Set([...subteamOptions, ...requests.map((request) => request.subteam.trim()).filter(Boolean)])]
+    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
   const filteredRequests = requests.filter((request) => {
     const matchesQuery = `${request.item} ${request.company} ${request.subteam} ${request.requestedBy}`.toLowerCase().includes(query.toLowerCase())
-    return matchesQuery && (statusFilter === 'All statuses' || request.status === statusFilter)
+    const matchesSubteam = !subteamFilter || request.subteam.trim().toLowerCase() === subteamFilter.toLowerCase()
+    return matchesQuery && matchesSubteam && (statusFilter === 'All statuses' || request.status === statusFilter)
   }).sort((left, right) => {
     if (requestSort === 'newest') return 0
     const urgency = { Urgent: 0, High: 1, Normal: 2, Low: 3 }
@@ -884,6 +886,7 @@ function App() {
               <div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search item, company, subteam..." aria-label="Search part requests" /></div>
               <div className="table-toolbar-controls">
                 <label className="select-control"><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select><ChevronDown size={15} /></label>
+                <label className="select-control"><span className="sr-only">Filter by subteam</span><select value={subteamFilter} onChange={(event) => setSubteamFilter(event.target.value)}><option value="">All subteams</option>{requestSubteams.map((subteam) => <option key={subteam} value={subteam}>{subteam}</option>)}</select><ChevronDown size={15} /></label>
                 <label className="select-control"><span className="sr-only">Sort part requests</span><select value={requestSort} onChange={(event) => setRequestSort(event.target.value as 'newest' | 'urgency')}><option value="newest">Sort: newest</option><option value="urgency">Sort: urgency</option></select><ChevronDown size={15} /></label>
               </div>
             </div>
@@ -895,7 +898,7 @@ function App() {
                 <td className="compat-cell" title={request.compatibility}>{request.compatibility || 'Not provided'}</td>
                 <td><select className="inline-select" aria-label={`Communication status for ${request.item}`} value={request.communication} onChange={(event) => updateRequest(request.id, 'communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></td>
                 <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></td>
-                <td className="amount-cell">{money(request.value)}</td><td className="row-actions"><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></td>
+                <td className="amount-cell">{money(request.value)}</td><td className="row-actions"><button type="button" className="icon-button row-action-button" title={`Edit ${request.item}`} aria-label={`Edit part request for ${request.item}`} onClick={() => setManagementEdit({ kind: 'request', record: request })}><Pencil size={15} /></button><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></td>
               </tr>)}
               {filteredRequests.length === 0 && <tr><td colSpan={9} className="empty-table">No requests match this search.</td></tr>}
             </tbody></table></div>
@@ -932,6 +935,7 @@ function App() {
                 <div className="lead-summary-tools">
                   <AssignmentSelect assignedId={lead.assigneeId} user={user} members={teamMembers} requesterSubteam={lead.requesterSubteam || lead.subteam} label={`Assignment for sponsor lead ${lead.company}`} onChange={(assigneeId) => void updateSponsorLeadAssignee(lead.id, assigneeId)} />
                   <select className="inline-select lead-status-select" aria-label={`Follow-up status for ${lead.company}`} value={lead.status} onChange={(event) => void updateSponsorLeadStatus(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select>
+                  <button type="button" className="icon-button row-action-button" title={`Edit ${lead.company}`} aria-label={`Edit sponsor lead for ${lead.company}`} onClick={() => setManagementEdit({ kind: 'lead', record: lead })}><Pencil size={15} /></button>
                   <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button>
                 </div>
               </article>)}
@@ -1000,7 +1004,7 @@ function RequestModal({ request, onClose, onSave }: { request?: PartRequest; onC
   const requestSubteams = subteamOptions.includes(form.subteam) ? subteamOptions : [...subteamOptions, form.subteam].filter(Boolean)
 
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="request-title">
-    <div className="modal-heading"><div><span className="section-kicker">{request ? 'DEV ADMINISTRATION' : 'TEAM INTAKE'}</span><h2 id="request-title">{request ? 'Edit part request' : 'Submit a part request'}</h2><p>Share enough context for the team to assess fit and reach out.</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+    <div className="modal-heading"><div><span className="section-kicker">{request ? 'PART REQUEST' : 'TEAM INTAKE'}</span><h2 id="request-title">{request ? 'Edit part request' : 'Submit a part request'}</h2><p>Share enough context for the team to assess fit and reach out.</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
     <form onSubmit={(event) => { event.preventDefault(); onSave({ ...form, quantity: Math.max(1, Number(form.quantity) || 1), value: Number(form.value) || 0 }) }}>
       <div className="form-grid">
         <label className="field"><span>Part or product <b>*</b></span><input required value={form.item} onChange={(event) => change('item', event.target.value)} placeholder="What does your team need?" /></label>
@@ -1098,7 +1102,7 @@ function SponsorLeadModal({ lead, onClose, onSave }: { lead?: SponsorLead; onClo
   }))
 
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-modal" role="dialog" aria-modal="true" aria-labelledby="lead-title">
-    <div className="modal-heading"><div><span className="section-kicker">{lead ? 'DEV ADMINISTRATION' : 'BUSINESS TEAM INTAKE'}</span><h2 id="lead-title">{lead ? 'Edit sponsor lead' : 'Submit a sponsor lead'}</h2><p>Share a company connection for the business team to follow up.</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+    <div className="modal-heading"><div><span className="section-kicker">{lead ? 'SPONSOR LEAD' : 'BUSINESS TEAM INTAKE'}</span><h2 id="lead-title">{lead ? 'Edit sponsor lead' : 'Submit a sponsor lead'}</h2><p>Share a company connection for the business team to follow up.</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
     <form onSubmit={(event) => { event.preventDefault(); if (!form.supportTypes.length) { setFormError('Choose at least one type of support.'); return } setFormError(''); void onSave({ ...form, estimatedAmount: Number(form.estimatedAmount) || 0, ...(lead ? { status: form.status } : {}) }) }}>
       <div className="form-grid">
         <label className="field"><span>Company or business <b>*</b></span><input required value={form.company} onChange={(event) => change('company', event.target.value)} placeholder="Organization name" /></label>

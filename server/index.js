@@ -199,7 +199,10 @@ function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssig
     res.status(400).json({ error: 'Choose an existing team member.' })
     return false
   }
-  if (canDelegate(user)) return validateAssignee(res, assigneeId, requesterSubteam)
+  if (canDelegate(user)) {
+    if (assigneeId === user.id) return true
+    return validateAssignee(res, assigneeId, requesterSubteam)
+  }
   const subteam = user.subteam.trim().toLowerCase()
   if (assigneeId === user.id && (subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase())) return true
   if (!assigneeId && currentAssigneeId === user.id) return true

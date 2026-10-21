@@ -258,7 +258,7 @@ export async function createRequest(input: PartRequestInput) {
   return result.record
 }
 
-export async function updateRequest(id: string, changes: Partial<Pick<PartRequest, 'status' | 'communication' | 'assigneeId'>>) {
+export async function updateRequest(id: string, changes: Partial<PartRequestInput & Pick<PartRequest, 'status' | 'communication' | 'assigneeId'>>) {
   const result = await request<{ record: PartRequest }>(`/api/requests/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(changes),
@@ -308,7 +308,7 @@ export async function createSponsorLead(input: SponsorLeadInput) {
   return result.record
 }
 
-export async function updateSponsorLead(id: string, changes: Partial<Pick<SponsorLead, 'status' | 'assigneeId'>>) {
+export async function updateSponsorLead(id: string, changes: Partial<SponsorLeadInput & Pick<SponsorLead, 'status' | 'assigneeId'>>) {
   const result = await request<{ record: SponsorLead }>(`/api/sponsor-leads/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(changes),

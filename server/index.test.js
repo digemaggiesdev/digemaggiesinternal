@@ -167,6 +167,12 @@ test('invite auth and shared records persist through the API', async () => {
   const { record: part } = await createdPartResponse.json()
   assert.equal(part.createdBy, account.displayName)
   assert.equal(part.requesterSubteam, account.subteam)
+  const devSelfAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ assigneeId: devUser.id }),
+  })
+  assert.equal((await devSelfAssignment.json()).record.assigneeId, devUser.id)
 
   const businessAccount = {
     ...account,
@@ -194,6 +200,13 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ status: 'In transit' }),
   })
   assert.equal((await updatedPartResponse.json()).record.status, 'In transit')
+  const memberPartEdit = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ specs: 'Updated by a regular member', compatibility: 'Verified against the build' }),
+  })
+  assert.equal(memberPartEdit.status, 200)
+  assert.equal((await memberPartEdit.json()).record.specs, 'Updated by a regular member')
   const unauthorizedAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
@@ -248,10 +261,16 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ assigneeId: accountUser.id }),
   })
   assert.equal((await execAssignment.json()).record.assigneeId, accountUser.id)
-  const invalidTargetAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+  const execSelfAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: execCookie },
     body: JSON.stringify({ assigneeId: execUser.id }),
+  })
+  assert.equal((await execSelfAssignment.json()).record.assigneeId, execUser.id)
+  const invalidTargetAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ assigneeId: 'missing-target' }),
   })
   assert.equal(invalidTargetAssignment.status, 400)
   const listedParts = await fetch(`${baseUrl}/api/requests`, { headers: { Cookie: cookie } })
@@ -345,6 +364,13 @@ test('invite auth and shared records persist through the API', async () => {
   assert.equal(lead.requesterSubteam, account.subteam)
   assert.equal(lead.status, 'New')
   assert.deepEqual(lead.supportTypes, sponsorLeadInput.supportTypes)
+  const memberLeadEdit = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ details: 'Updated by a regular member', estimatedAmount: 250 }),
+  })
+  assert.equal(memberLeadEdit.status, 200)
+  assert.equal((await memberLeadEdit.json()).record.details, 'Updated by a regular member')
   const selfAssignedLeadResponse = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },

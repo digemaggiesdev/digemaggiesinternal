@@ -209,6 +209,7 @@ async function assigneeAuthorizationError(database, user, assigneeId, requesterS
     return member ? null : { error: 'Choose an existing team member.', status: 400 }
   }
   if (canDelegate(user)) {
+    if (assigneeId === user.id) return null
     return await isEligibleAssignee(database, assigneeId, requesterSubteam)
       ? null
       : { error: 'Choose a member from the Business subteam or the requester’s subteam.', status: 400 }

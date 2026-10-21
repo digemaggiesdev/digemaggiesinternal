@@ -9,11 +9,16 @@ import {
   accountDeleteSchema,
   accountPatchSchema,
   loginSchema,
+  managementPartRequestPatchSchema,
+  managementSponsorLeadPatchSchema,
+  managementUserPatchSchema,
   partRequestPatchSchema,
   partRequestSchema,
   registerSchema,
   sponsorLeadPatchSchema,
   sponsorLeadSchema,
+  subteamChangeRequestSchema,
+  subteamChangeReviewSchema,
   sponsorshipPatchSchema,
   sponsorshipSchema,
 } from './validation.js'
@@ -23,9 +28,13 @@ const app = express()
 const sessionLifetime = 7 * 24 * 60 * 60 * 1000
 const isProduction = process.env.NODE_ENV === 'production'
 const inviteCode = process.env.TEAM_INVITE_CODE || (isProduction ? '' : 'digem-dev-invite')
+const devInviteCode = process.env.DEV_INVITE_CODE || ''
 
 if (isProduction && !inviteCode) {
   throw new Error('TEAM_INVITE_CODE must be configured in production.')
+}
+if (devInviteCode && devInviteCode === inviteCode) {
+  throw new Error('DEV_INVITE_CODE must be different from TEAM_INVITE_CODE.')
 }
 
 app.disable('x-powered-by')
@@ -40,7 +49,7 @@ const authLimiter = rateLimit({
 })
 
 function publicUser(user) {
-  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '' }
+  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '', tag: user.tag || 'member' }
 }
 
 function getCookie(req, name) {
@@ -79,7 +88,7 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Sign in to continue.' })
 
   const session = db.prepare(`
-    SELECT users.id, users.email, users.display_name, users.subteam
+    SELECT users.id, users.email, users.display_name, users.subteam, users.tag
     FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = ? AND sessions.expires_at > ?
   `).get(tokenHash(token), Date.now())
@@ -87,6 +96,11 @@ function requireAuth(req, res, next) {
   if (!session) return res.status(401).json({ error: 'Your session expired. Sign in again.' })
   req.user = publicUser(session)
   req.sessionTokenHash = tokenHash(token)
+  next()
+}
+
+function requireDev(req, res, next) {
+  if (!isDev(req.user)) return res.status(403).json({ error: 'Dev access is required.' })
   next()
 }
 
@@ -153,6 +167,14 @@ function canDelegate(user) {
   return user.subteam.trim().toLowerCase() === 'exec'
 }
 
+function isDev(user) {
+  return user.tag === 'dev'
+}
+
+function canReviewSubteamChanges(user) {
+  return isDev(user) || canDelegate(user)
+}
+
 function validateAssignee(res, assigneeId, requesterSubteam) {
   if (!assigneeId) return true
   const assignee = db.prepare('SELECT subteam FROM users WHERE id = ?').get(assigneeId)
@@ -165,6 +187,11 @@ function validateAssignee(res, assigneeId, requesterSubteam) {
 }
 
 function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssigneeId) {
+  if (isDev(user)) {
+    if (!assigneeId || db.prepare('SELECT id FROM users WHERE id = ?').get(assigneeId)) return true
+    res.status(400).json({ error: 'Choose an existing team member.' })
+    return false
+  }
   if (canDelegate(user)) return validateAssignee(res, assigneeId, requesterSubteam)
   const subteam = user.subteam.trim().toLowerCase()
   if (assigneeId === user.id && (subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase())) return true
@@ -182,15 +209,16 @@ app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
 app.post('/api/auth/register', authLimiter, async (req, res, next) => {
   const input = parseBody(registerSchema, req, res)
   if (!input) return
-  if (input.inviteCode !== inviteCode) return res.status(403).json({ error: 'That team invite code is not valid.' })
+  const tag = devInviteCode && input.inviteCode === devInviteCode ? 'dev' : 'member'
+  if (tag === 'member' && input.inviteCode !== inviteCode) return res.status(403).json({ error: 'That team invite code is not valid.' })
 
   try {
     const id = randomUUID()
     const hash = await passwordHash(input.password)
-    db.prepare('INSERT INTO users (id, email, display_name, subteam, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, input.email, input.displayName, input.subteam, hash, new Date().toISOString())
+    db.prepare('INSERT INTO users (id, email, display_name, subteam, tag, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, input.email, input.displayName, input.subteam, tag, hash, new Date().toISOString())
     issueSession(res, id)
-    res.status(201).json({ user: { id, email: input.email, displayName: input.displayName, subteam: input.subteam } })
+    res.status(201).json({ user: { id, email: input.email, displayName: input.displayName, subteam: input.subteam, tag } })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
     next(error)
@@ -225,14 +253,104 @@ app.patch('/api/account', requireAuth, (req, res) => {
   const input = parseBody(accountPatchSchema, req, res)
   if (!input) return
   try {
-    db.prepare('UPDATE users SET display_name = ?, email = ?, subteam = ? WHERE id = ?')
-      .run(input.displayName, input.email, input.subteam, req.user.id)
-    const updated = db.prepare('SELECT id, email, display_name, subteam FROM users WHERE id = ?').get(req.user.id)
+    db.prepare('UPDATE users SET display_name = ?, email = ? WHERE id = ?')
+      .run(input.displayName, input.email, req.user.id)
+    const updated = db.prepare('SELECT id, email, display_name, subteam, tag FROM users WHERE id = ?').get(req.user.id)
     res.json({ user: publicUser(updated) })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
     throw error
   }
+})
+
+function getSubteamChangeRequest(id) {
+  return db.prepare(`
+    SELECT requests.id, requests.user_id AS userId, users.display_name AS requesterName,
+      requests.current_subteam AS currentSubteam, requests.requested_subteam AS requestedSubteam,
+      requests.status, reviewer.display_name AS reviewedBy, requests.created_at AS createdAt,
+      requests.reviewed_at AS reviewedAt
+    FROM subteam_change_requests AS requests
+    JOIN users ON users.id = requests.user_id
+    LEFT JOIN users AS reviewer ON reviewer.id = requests.reviewed_by
+    WHERE requests.id = ?
+  `).get(id)
+}
+
+app.get('/api/subteam-change-requests', requireAuth, (req, res) => {
+  const exec = canReviewSubteamChanges(req.user)
+  const requests = db.prepare(`
+    SELECT requests.id, requests.user_id AS userId, users.display_name AS requesterName,
+      requests.current_subteam AS currentSubteam, requests.requested_subteam AS requestedSubteam,
+      requests.status, reviewer.display_name AS reviewedBy, requests.created_at AS createdAt,
+      requests.reviewed_at AS reviewedAt
+    FROM subteam_change_requests AS requests
+    JOIN users ON users.id = requests.user_id
+    LEFT JOIN users AS reviewer ON reviewer.id = requests.reviewed_by
+    WHERE requests.user_id = ? OR (? = 1 AND requests.status = 'pending')
+    ORDER BY requests.created_at DESC
+  `).all(req.user.id, Number(exec))
+  res.json({ requests })
+})
+
+app.post('/api/subteam-change-requests', requireAuth, (req, res) => {
+  const input = parseBody(subteamChangeRequestSchema, req, res)
+  if (!input) return
+  if (input.subteam.trim().toLowerCase() === req.user.subteam.trim().toLowerCase()) {
+    return res.status(400).json({ error: 'Choose a subteam different from your current one.' })
+  }
+  const id = randomUUID()
+  const now = new Date().toISOString()
+  try {
+    db.prepare(`
+      INSERT INTO subteam_change_requests
+        (id, user_id, current_subteam, requested_subteam, status, created_at)
+      VALUES (?, ?, ?, ?, 'pending', ?)
+    `).run(id, req.user.id, req.user.subteam, input.subteam, now)
+  } catch (error) {
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({ error: 'You already have a pending subteam change request.' })
+    }
+    throw error
+  }
+  res.status(201).json({ request: getSubteamChangeRequest(id) })
+})
+
+app.patch('/api/subteam-change-requests/:id', requireAuth, (req, res) => {
+  const input = parseBody(subteamChangeReviewSchema, req, res)
+  if (!input) return
+  if (!canReviewSubteamChanges(req.user)) return res.status(403).json({ error: 'Only Exec members or Dev administrators can review subteam change requests.' })
+  const request = db.prepare('SELECT user_id, requested_subteam, status FROM subteam_change_requests WHERE id = ?')
+    .get(req.params.id)
+  if (!request) return res.status(404).json({ error: 'Subteam change request not found.' })
+  if (request.user_id === req.user.id) {
+    return res.status(403).json({ error: 'You cannot review your own subteam change request.' })
+  }
+  if (request.status !== 'pending') return res.status(409).json({ error: 'This subteam change request has already been reviewed.' })
+
+  const reviewedAt = new Date().toISOString()
+  const reviewRequest = db.transaction(() => {
+    const result = db.prepare(`
+      UPDATE subteam_change_requests
+      SET status = ?, reviewed_by = ?, reviewed_at = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(input.status, req.user.id, reviewedAt, req.params.id)
+    if (!result.changes) return false
+    if (input.status === 'approved') {
+      db.prepare('UPDATE users SET subteam = ? WHERE id = ?').run(request.requested_subteam, request.user_id)
+    }
+    return true
+  })
+  if (!reviewRequest()) return res.status(409).json({ error: 'This subteam change request has already been reviewed.' })
+  res.json({ request: getSubteamChangeRequest(req.params.id) })
+})
+
+app.delete('/api/subteam-change-requests/:id', requireAuth, (req, res) => {
+  const result = db.prepare(`
+    DELETE FROM subteam_change_requests
+    WHERE id = ? AND user_id = ? AND status = 'pending'
+  `).run(req.params.id, req.user.id)
+  if (!result.changes) return res.status(404).json({ error: 'Pending subteam change request not found.' })
+  res.status(204).end()
 })
 
 app.delete('/api/account', requireAuth, async (req, res, next) => {
@@ -261,6 +379,54 @@ app.delete('/api/account', requireAuth, async (req, res, next) => {
 app.get('/api/team-members', requireAuth, (_req, res) => {
   const members = db.prepare('SELECT id, display_name AS displayName, subteam FROM users ORDER BY display_name').all()
   res.json({ members })
+})
+
+app.get('/api/management/users', requireAuth, requireDev, (_req, res) => {
+  const users = db.prepare('SELECT id, email, display_name AS displayName, subteam, tag FROM users ORDER BY display_name').all()
+  res.json({ users })
+})
+
+app.patch('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
+  const input = parseBody(managementUserPatchSchema, req, res)
+  if (!input) return
+  try {
+    const result = db.prepare('UPDATE users SET display_name = ?, email = ?, subteam = ? WHERE id = ?')
+      .run(input.displayName, input.email, input.subteam, req.params.id)
+    if (!result.changes) return res.status(404).json({ error: 'Team member not found.' })
+    const updated = db.prepare('SELECT id, email, display_name, subteam, tag FROM users WHERE id = ?').get(req.params.id)
+    res.json({ user: publicUser(updated) })
+  } catch (error) {
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
+    throw error
+  }
+})
+
+app.patch('/api/management/requests/:id', requireAuth, requireDev, (req, res) => {
+  const input = parseBody(managementPartRequestPatchSchema, req, res)
+  if (!input) return
+  const existing = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(req.params.id, 'part_request')
+  if (!existing) return res.status(404).json({ error: 'Part request not found.' })
+  if (Object.hasOwn(input, 'assigneeId') && !authorizeAssignee(res, req.user, input.assigneeId, JSON.parse(existing.data).requesterSubteam || '', JSON.parse(existing.data).assigneeId)) return
+  const record = updateRecord('part_request', req.params.id, input)
+  res.json({ record })
+})
+
+app.patch('/api/management/sponsorships/:id', requireAuth, requireDev, (req, res) => {
+  const input = parseBody(sponsorshipPatchSchema, req, res)
+  if (!input) return
+  const record = updateRecord('sponsorship', req.params.id, input)
+  if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
+  res.json({ record })
+})
+
+app.patch('/api/management/sponsor-leads/:id', requireAuth, requireDev, (req, res) => {
+  const input = parseBody(managementSponsorLeadPatchSchema, req, res)
+  if (!input) return
+  const existing = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(req.params.id)
+  if (!existing) return res.status(404).json({ error: 'Sponsor lead not found.' })
+  if (Object.hasOwn(input, 'assigneeId') && !authorizeAssignee(res, req.user, input.assigneeId, JSON.parse(existing.data).requesterSubteam || '', JSON.parse(existing.data).assigneeId)) return
+  const record = updateSponsorLead(req.params.id, input)
+  res.json({ record })
 })
 
 app.get('/api/requests', requireAuth, (_req, res) => res.json({ records: listRecords('part_request') }))

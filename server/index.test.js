@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import Database from 'better-sqlite3'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
@@ -14,7 +15,7 @@ const port = await getFreePort()
 const baseUrl = `http://127.0.0.1:${port}`
 const serverPath = fileURLToPath(new URL('./index.js', import.meta.url))
 const server = spawn(process.execPath, [serverPath], {
-  env: { ...process.env, NODE_ENV: 'test', PORT: String(port), DATABASE_PATH: databasePath, TEAM_INVITE_CODE: 'integration-test-invite' },
+  env: { ...process.env, NODE_ENV: 'test', PORT: String(port), DATABASE_PATH: databasePath, TEAM_INVITE_CODE: 'integration-test-invite', DEV_INVITE_CODE: 'integration-test-dev-invite' },
   stdio: ['ignore', 'pipe', 'pipe'],
 })
 
@@ -78,11 +79,42 @@ test('invite auth and shared records persist through the API', async () => {
   assert.equal(registration.status, 201)
   const accountUser = (await registration.clone().json()).user
   assert.equal(accountUser.subteam, account.subteam)
+  assert.equal(accountUser.tag, 'member')
   const cookie = registration.headers.get('set-cookie')?.split(';')[0]
   assert.ok(cookie)
   assert.match(registration.headers.get('set-cookie'), /HttpOnly/i)
   const sessionResponse = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
   assert.equal((await sessionResponse.json()).user.subteam, account.subteam)
+  const devRegistration = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      displayName: 'Test Dev Administrator', subteam: 'Business',
+      email: 'test-dev@example.com', password: 'a-long-dev-password', inviteCode: 'integration-test-dev-invite',
+    }),
+  })
+  assert.equal(devRegistration.status, 201)
+  const { user: devUser } = await devRegistration.clone().json()
+  assert.equal(devUser.subteam, 'Business')
+  assert.equal(devUser.tag, 'dev')
+  const devCookie = devRegistration.headers.get('set-cookie')?.split(';')[0]
+  const ordinaryCodeCannotGrantDev = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      displayName: 'Ordinary Member', subteam: 'Business',
+      email: 'ordinary-member@example.com', password: 'a-long-ordinary-password', inviteCode: 'integration-test-invite',
+    }),
+  })
+  assert.equal((await ordinaryCodeCannotGrantDev.json()).user.tag, 'member')
+  const regularMemberManagement = await fetch(`${baseUrl}/api/management/users`, { headers: { Cookie: cookie } })
+  assert.equal(regularMemberManagement.status, 403)
+  const forbiddenExecRequest = await fetch(`${baseUrl}/api/subteam-change-requests`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ subteam: 'Exec' }),
+  })
+  assert.equal(forbiddenExecRequest.status, 400)
 
   const duplicate = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
@@ -172,14 +204,23 @@ test('invite auth and shared records persist through the API', async () => {
   })
   assert.equal(businessCannotAssignOthers.status, 403)
   const execAccount = { ...account, displayName: 'Exec Member', subteam: 'Exec', email: 'exec-member@example.com' }
-  const execRegistration = await fetch(`${baseUrl}/api/auth/register`, {
+  const unauthorizedExecRegistration = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(execAccount),
   })
+  assert.equal(unauthorizedExecRegistration.status, 400)
+  const execRegistration = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...execAccount, subteam: 'Controls' }),
+  })
   assert.equal(execRegistration.status, 201)
   const execUser = (await execRegistration.clone().json()).user
   const execCookie = execRegistration.headers.get('set-cookie')?.split(';')[0]
+  const provisioningDb = new Database(databasePath)
+  provisioningDb.prepare('UPDATE users SET subteam = ? WHERE id = ?').run('Exec', execUser.id)
+  provisioningDb.close()
   const execAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: execCookie },
@@ -241,6 +282,13 @@ test('invite auth and shared records persist through the API', async () => {
   ])
   const listedSponsors = await fetch(`${baseUrl}/api/sponsorships`, { headers: { Cookie: cookie } })
   assert.equal((await listedSponsors.json()).records[0].company, 'Edited Test Sponsor')
+  const managedSponsor = await fetch(`${baseUrl}/api/management/sponsorships/${sponsor.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ contact: 'Dev edited sponsor contact' }),
+  })
+  assert.equal(managedSponsor.status, 200, await managedSponsor.clone().text())
+  assert.equal((await managedSponsor.json()).record.contact, 'Dev edited sponsor contact')
 
   const teammateRegistration = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
@@ -314,23 +362,142 @@ test('invite auth and shared records persist through the API', async () => {
   assert.equal((await leadStatusResponse.json()).record.status, 'Following up')
   const sharedLeads = await fetch(`${baseUrl}/api/sponsor-leads`, { headers: { Cookie: teammateCookie } })
   assert.equal((await sharedLeads.json()).records[0].company, sponsorLeadInput.company)
+  const directSubteamChange = await fetch(`${baseUrl}/api/account`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ displayName: account.displayName, email: account.email, subteam: 'Exec' }),
+  })
+  assert.equal(directSubteamChange.status, 400)
+  const unchangedSubteam = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
+  assert.equal((await unchangedSubteam.json()).user.subteam, account.subteam)
+
+  const subteamRequestResponse = await fetch(`${baseUrl}/api/subteam-change-requests`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ subteam: 'Software' }),
+  })
+  assert.equal(subteamRequestResponse.status, 201)
+  const { request: subteamRequest } = await subteamRequestResponse.json()
+  assert.equal(subteamRequest.status, 'pending')
+  assert.equal(subteamRequest.currentSubteam, account.subteam)
+  assert.equal(subteamRequest.requestedSubteam, 'Software')
+  const duplicateSubteamRequest = await fetch(`${baseUrl}/api/subteam-change-requests`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ subteam: 'Hydraulics' }),
+  })
+  assert.equal(duplicateSubteamRequest.status, 409)
+  const pendingRequests = await fetch(`${baseUrl}/api/subteam-change-requests`, { headers: { Cookie: cookie } })
+  assert.equal((await pendingRequests.json()).requests[0].id, subteamRequest.id)
+
+  const nonExecReview = await fetch(`${baseUrl}/api/subteam-change-requests/${subteamRequest.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: businessCookie },
+    body: JSON.stringify({ status: 'approved' }),
+  })
+  assert.equal(nonExecReview.status, 403)
+  const execReview = await fetch(`${baseUrl}/api/subteam-change-requests/${subteamRequest.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ status: 'approved' }),
+  })
+  assert.equal((await execReview.json()).request.status, 'approved')
+  const approvedSubteamSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
+  assert.equal((await approvedSubteamSession.json()).user.subteam, 'Software')
+  const secondSubteamRequest = await fetch(`${baseUrl}/api/subteam-change-requests`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ subteam: 'Controls' }),
+  })
+  assert.equal(secondSubteamRequest.status, 201)
+  const { request: rejectedRequest } = await secondSubteamRequest.json()
+  const execReject = await fetch(`${baseUrl}/api/subteam-change-requests/${rejectedRequest.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ status: 'rejected' }),
+  })
+  assert.equal((await execReject.json()).request.status, 'rejected')
+  const rejectedSubteamSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
+  assert.equal((await rejectedSubteamSession.json()).user.subteam, 'Software')
+
+  const execOwnRequest = await fetch(`${baseUrl}/api/subteam-change-requests`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ subteam: 'Business' }),
+  })
+  const { request: execSubteamRequest } = await execOwnRequest.json()
+  const execSelfReview = await fetch(`${baseUrl}/api/subteam-change-requests/${execSubteamRequest.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ status: 'approved' }),
+  })
+  assert.equal(execSelfReview.status, 403)
+  const cancelExecRequest = await fetch(`${baseUrl}/api/subteam-change-requests/${execSubteamRequest.id}`, {
+    method: 'DELETE',
+    headers: { Cookie: execCookie },
+  })
+  assert.equal(cancelExecRequest.status, 204)
+
+  const devApprovedRequestResponse = await fetch(`${baseUrl}/api/subteam-change-requests`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: teammateCookie },
+    body: JSON.stringify({ subteam: 'Software' }),
+  })
+  const { request: devApprovedRequest } = await devApprovedRequestResponse.json()
+  const devApproval = await fetch(`${baseUrl}/api/subteam-change-requests/${devApprovedRequest.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ status: 'approved' }),
+  })
+  assert.equal((await devApproval.json()).request.reviewedBy, devUser.displayName)
+  const adminUsers = await fetch(`${baseUrl}/api/management/users`, { headers: { Cookie: devCookie } })
+  assert.equal(adminUsers.status, 200)
+  const { users: managedUsers } = await adminUsers.json()
+  assert.ok(managedUsers.some((member) => member.id === accountUser.id && member.tag === 'member'))
+  const assignedExec = await fetch(`${baseUrl}/api/management/users/${businessUser.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ displayName: businessAccount.displayName, email: businessAccount.email, subteam: 'Exec' }),
+  })
+  assert.equal((await assignedExec.json()).user.subteam, 'Exec')
+  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: businessCookie } })).json()).user.tag, 'member')
+  const managedPart = await fetch(`${baseUrl}/api/management/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ item: 'Dev edited hydraulic fitting', priority: 'Urgent' }),
+  })
+  assert.equal((await managedPart.json()).record.item, 'Dev edited hydraulic fitting')
+  const managedLead = await fetch(`${baseUrl}/api/management/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ details: 'Dev edited sponsor lead details', status: 'Following up' }),
+  })
+  assert.equal((await managedLead.json()).record.details, 'Dev edited sponsor lead details')
+  const devAccountUpdate = await fetch(`${baseUrl}/api/account`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ displayName: 'Updated Dev Administrator', email: 'test-dev@example.com' }),
+  })
+  assert.equal((await devAccountUpdate.json()).user.tag, 'dev')
+
   const accountUpdate = await fetch(`${baseUrl}/api/account`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
-    body: JSON.stringify({ displayName: 'Updated Test Member', email: 'updated-test-member@example.com', subteam: account.subteam }),
+    body: JSON.stringify({ displayName: 'Updated Test Member', email: 'updated-test-member@example.com' }),
   })
   assert.deepEqual((await accountUpdate.json()).user, {
     id: accountUser.id,
     email: 'updated-test-member@example.com',
     displayName: 'Updated Test Member',
-    subteam: account.subteam,
+    subteam: 'Software',
+    tag: 'member',
   })
   const updatedSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
   assert.equal((await updatedSession.json()).user.displayName, 'Updated Test Member')
   const duplicateEmail = await fetch(`${baseUrl}/api/account`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
-    body: JSON.stringify({ displayName: 'Updated Test Member', email: 'business-member@example.com', subteam: account.subteam }),
+    body: JSON.stringify({ displayName: 'Updated Test Member', email: 'business-member@example.com' }),
   })
   assert.equal(duplicateEmail.status, 409)
   const rejectedDeletion = await fetch(`${baseUrl}/api/account`, {

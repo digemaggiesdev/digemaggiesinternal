@@ -12,7 +12,6 @@ export const subteamOptions = [
   'Tunnel Lining',
   'Electronics',
   'Software',
-  'Exec',
   'Business',
   'Integration',
 ]
@@ -22,12 +21,25 @@ export type TeamUser = {
   email: string
   displayName: string
   subteam: string
+  tag: 'member' | 'dev'
 }
 
 export type TeamMember = {
   id: string
   displayName: string
   subteam: string
+}
+
+export type SubteamChangeRequest = {
+  id: string
+  userId: string
+  requesterName: string
+  currentSubteam: string
+  requestedSubteam: string
+  status: 'pending' | 'approved' | 'rejected'
+  reviewedBy: string | null
+  createdAt: string
+  reviewedAt: string | null
 }
 
 export type PartRequest = {
@@ -146,12 +158,74 @@ export async function signOut() {
   await request<void>('/api/auth/logout', { method: 'POST' })
 }
 
-export async function updateAccount(changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) {
+export async function updateAccount(changes: Pick<TeamUser, 'displayName' | 'email'>) {
   const result = await request<{ user: TeamUser }>('/api/account', {
     method: 'PATCH',
     body: JSON.stringify(changes),
   })
   return result.user
+}
+
+export async function getManagementUsers() {
+  const result = await request<{ users: TeamUser[] }>('/api/management/users')
+  return result.users
+}
+
+export async function updateManagementUser(id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) {
+  const result = await request<{ user: TeamUser }>(`/api/management/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+  return result.user
+}
+
+export async function updateManagementRequest(id: string, changes: Partial<PartRequestInput>) {
+  const result = await request<{ record: PartRequest }>(`/api/management/requests/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+  return result.record
+}
+
+export async function updateManagementSponsor(id: string, changes: Partial<SponsorInput>) {
+  const result = await request<{ record: Sponsor }>(`/api/management/sponsorships/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+  return result.record
+}
+
+export async function updateManagementSponsorLead(id: string, changes: Partial<SponsorLeadInput & Pick<SponsorLead, 'status' | 'assigneeId'>>) {
+  const result = await request<{ record: SponsorLead }>(`/api/management/sponsor-leads/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+  return result.record
+}
+
+export async function getSubteamChangeRequests() {
+  const result = await request<{ requests: SubteamChangeRequest[] }>('/api/subteam-change-requests')
+  return result.requests
+}
+
+export async function requestSubteamChange(subteam: string) {
+  const result = await request<{ request: SubteamChangeRequest }>('/api/subteam-change-requests', {
+    method: 'POST',
+    body: JSON.stringify({ subteam }),
+  })
+  return result.request
+}
+
+export async function reviewSubteamChangeRequest(id: string, status: 'approved' | 'rejected') {
+  const result = await request<{ request: SubteamChangeRequest }>(`/api/subteam-change-requests/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  })
+  return result.request
+}
+
+export async function cancelSubteamChangeRequest(id: string) {
+  await request<void>(`/api/subteam-change-requests/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export async function deleteAccount(password: string) {

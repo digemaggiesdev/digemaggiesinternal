@@ -5,11 +5,16 @@ import {
   accountDeleteSchema,
   accountPatchSchema,
   loginSchema,
+  managementPartRequestPatchSchema,
+  managementSponsorLeadPatchSchema,
+  managementUserPatchSchema,
   partRequestPatchSchema,
   partRequestSchema,
   registerSchema,
   sponsorLeadPatchSchema,
   sponsorLeadSchema,
+  subteamChangeRequestSchema,
+  subteamChangeReviewSchema,
   sponsorshipPatchSchema,
   sponsorshipSchema,
 } from '../../server/validation.js'
@@ -51,7 +56,7 @@ async function passwordMatches(password, stored) {
 }
 
 function publicUser(user) {
-  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '' }
+  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '', tag: user.tag || 'member' }
 }
 
 function setSessionCookie(request, token, maxAge = sessionLifetime / 1000) {
@@ -101,7 +106,7 @@ async function findSession(database, request) {
 
   const tokenHash = sha256(token)
   const [row] = await database.sql`
-    SELECT users.id, users.email, users.display_name, users.subteam
+    SELECT users.id, users.email, users.display_name, users.subteam, users.tag
     FROM sessions
     JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = ${tokenHash} AND sessions.expires_at > ${Date.now()}
@@ -175,6 +180,14 @@ function canDelegate(user) {
   return user.subteam.trim().toLowerCase() === 'exec'
 }
 
+function isDev(user) {
+  return user.tag === 'dev'
+}
+
+function canReviewSubteamChanges(user) {
+  return isDev(user) || canDelegate(user)
+}
+
 async function isEligibleAssignee(database, assigneeId, requesterSubteam) {
   if (!assigneeId) return true
   const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId}`
@@ -183,6 +196,11 @@ async function isEligibleAssignee(database, assigneeId, requesterSubteam) {
 }
 
 async function assigneeAuthorizationError(database, user, assigneeId, requesterSubteam, currentAssigneeId) {
+  if (isDev(user)) {
+    if (!assigneeId) return null
+    const [member] = await database.sql`SELECT id FROM users WHERE id = ${assigneeId}`
+    return member ? null : { error: 'Choose an existing team member.', status: 400 }
+  }
   if (canDelegate(user)) {
     return await isEligibleAssignee(database, assigneeId, requesterSubteam)
       ? null
@@ -209,6 +227,11 @@ function getRouteId(path, prefix) {
 }
 
 export function createApiHandler(database, environment = process.env) {
+  const devInviteCode = environment.DEV_INVITE_CODE || ''
+  if (devInviteCode && environment.TEAM_INVITE_CODE && devInviteCode === environment.TEAM_INVITE_CODE) {
+    throw new Error('DEV_INVITE_CODE must be different from TEAM_INVITE_CODE.')
+  }
+
   return async function handleApiRequest(request) {
     const { method } = request
     const { pathname } = new URL(request.url)
@@ -231,7 +254,8 @@ export function createApiHandler(database, environment = process.env) {
 
         if (pathname === '/api/auth/register') {
           const input = parsed.data
-          if (!environment.TEAM_INVITE_CODE || input.inviteCode !== environment.TEAM_INVITE_CODE) {
+          const tag = devInviteCode && input.inviteCode === devInviteCode ? 'dev' : 'member'
+          if (tag === 'member' && (!environment.TEAM_INVITE_CODE || input.inviteCode !== environment.TEAM_INVITE_CODE)) {
             return jsonError('That team invite code is not valid.', 403)
           }
 
@@ -244,8 +268,8 @@ export function createApiHandler(database, environment = process.env) {
           try {
             await client.query('BEGIN')
             const result = await client.query(
-              'INSERT INTO users (id, email, display_name, subteam, password_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, display_name, subteam',
-              [id, input.email, input.displayName, input.subteam, hash, createdAt],
+              'INSERT INTO users (id, email, display_name, subteam, tag, password_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email, display_name, subteam, tag',
+              [id, input.email, input.displayName, input.subteam, tag, hash, createdAt],
             )
             await client.query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [sha256(token), id, expiresAt])
             await client.query('COMMIT')
@@ -284,15 +308,90 @@ export function createApiHandler(database, environment = process.env) {
         return new Response(null, { status: 204, headers: { 'Set-Cookie': setSessionCookie(request, '', 0) } })
       }
 
+      const isAdministrator = isDev(session.user)
+      if (pathname.startsWith('/api/management/') && !isAdministrator) return jsonError('Dev access is required.', 403)
+
+      if (pathname === '/api/management/users' && method === 'GET') {
+        const users = await database.sql`
+          SELECT id, email, display_name AS "displayName", subteam, tag
+          FROM users ORDER BY display_name
+        `
+        return Response.json({ users })
+      }
+
+      const managedUserId = getRouteId(pathname, '/api/management/users/')
+      if (managedUserId && method === 'PATCH') {
+        const parsed = await parseBody(request, managementUserPatchSchema)
+        if (parsed.response) return parsed.response
+        try {
+          const [updated] = await database.sql`
+            UPDATE users
+            SET display_name = ${parsed.data.displayName}, email = ${parsed.data.email}, subteam = ${parsed.data.subteam}
+            WHERE id = ${managedUserId}
+            RETURNING id, email, display_name, subteam, tag
+          `
+          return updated ? Response.json({ user: publicUser(updated) }) : jsonError('Team member not found.', 404)
+        } catch (error) {
+          if (error.code === '23505' || error.cause?.code === '23505') {
+            return jsonError('An account with that email already exists.', 409)
+          }
+          throw error
+        }
+      }
+
+      const managedRequestId = getRouteId(pathname, '/api/management/requests/')
+      if (managedRequestId && method === 'PATCH') {
+        const parsed = await parseBody(request, managementPartRequestPatchSchema)
+        if (parsed.response) return parsed.response
+        if (Object.hasOwn(parsed.data, 'assigneeId')) {
+          const [existing] = await database.sql`SELECT data FROM records WHERE id = ${managedRequestId} AND kind = 'part_request'`
+          if (!existing) return jsonError('Part request not found.', 404)
+          const assignmentError = await assigneeAuthorizationError(
+            database, session.user, parsed.data.assigneeId,
+            existing.data.requesterSubteam || existing.data.subteam,
+            existing.data.assigneeId,
+          )
+          if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+        }
+        const record = await updateRecord(database, 'part_request', managedRequestId, parsed.data)
+        return record ? Response.json({ record }) : jsonError('Part request not found.', 404)
+      }
+
+      const managedSponsorshipId = getRouteId(pathname, '/api/management/sponsorships/')
+      if (managedSponsorshipId && method === 'PATCH') {
+        const parsed = await parseBody(request, sponsorshipPatchSchema)
+        if (parsed.response) return parsed.response
+        const record = await updateRecord(database, 'sponsorship', managedSponsorshipId, parsed.data)
+        return record ? Response.json({ record }) : jsonError('Sponsorship not found.', 404)
+      }
+
+      const managedSponsorLeadId = getRouteId(pathname, '/api/management/sponsor-leads/')
+      if (managedSponsorLeadId && method === 'PATCH') {
+        const parsed = await parseBody(request, managementSponsorLeadPatchSchema)
+        if (parsed.response) return parsed.response
+        if (Object.hasOwn(parsed.data, 'assigneeId')) {
+          const [existing] = await database.sql`SELECT data FROM sponsor_leads WHERE id = ${managedSponsorLeadId}`
+          if (!existing) return jsonError('Sponsor lead not found.', 404)
+          const assignmentError = await assigneeAuthorizationError(
+            database, session.user, parsed.data.assigneeId,
+            existing.data.requesterSubteam || existing.data.subteam || '',
+            existing.data.assigneeId,
+          )
+          if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+        }
+        const record = await updateSponsorLead(database, managedSponsorLeadId, parsed.data)
+        return record ? Response.json({ record }) : jsonError('Sponsor lead not found.', 404)
+      }
+
       if (pathname === '/api/account' && method === 'PATCH') {
         const parsed = await parseBody(request, accountPatchSchema)
         if (parsed.response) return parsed.response
         try {
           const [updated] = await database.sql`
             UPDATE users
-            SET display_name = ${parsed.data.displayName}, email = ${parsed.data.email}, subteam = ${parsed.data.subteam}
+            SET display_name = ${parsed.data.displayName}, email = ${parsed.data.email}
             WHERE id = ${session.user.id}
-            RETURNING id, email, display_name, subteam
+            RETURNING id, email, display_name, subteam, tag
           `
           return Response.json({ user: publicUser(updated) })
         } catch (error) {
@@ -302,6 +401,123 @@ export function createApiHandler(database, environment = process.env) {
           throw error
         }
       }
+
+      if (pathname === '/api/subteam-change-requests' && method === 'GET') {
+        const exec = canReviewSubteamChanges(session.user)
+        const requests = await database.sql`
+          SELECT requests.id, requests.user_id AS "userId", users.display_name AS "requesterName",
+            requests.current_subteam AS "currentSubteam", requests.requested_subteam AS "requestedSubteam",
+            requests.status, reviewer.display_name AS "reviewedBy", requests.created_at AS "createdAt",
+            requests.reviewed_at AS "reviewedAt"
+          FROM subteam_change_requests AS requests
+          JOIN users ON users.id = requests.user_id
+          LEFT JOIN users AS reviewer ON reviewer.id = requests.reviewed_by
+          WHERE requests.user_id = ${session.user.id} OR (${exec} AND requests.status = 'pending')
+          ORDER BY requests.created_at DESC
+        `
+        return Response.json({ requests })
+      }
+      if (pathname === '/api/subteam-change-requests' && method === 'POST') {
+        const parsed = await parseBody(request, subteamChangeRequestSchema)
+        if (parsed.response) return parsed.response
+        if (parsed.data.subteam.trim().toLowerCase() === session.user.subteam.trim().toLowerCase()) {
+          return jsonError('Choose a subteam different from your current one.', 400)
+        }
+        const id = randomUUID()
+        const createdAt = new Date().toISOString()
+        try {
+          await database.sql`
+            INSERT INTO subteam_change_requests
+              (id, user_id, current_subteam, requested_subteam, status, created_at)
+            VALUES (${id}, ${session.user.id}, ${session.user.subteam}, ${parsed.data.subteam}, 'pending', ${createdAt})
+          `
+        } catch (error) {
+          if (error.code === '23505' || error.cause?.code === '23505') {
+            return jsonError('You already have a pending subteam change request.', 409)
+          }
+          throw error
+        }
+        const [created] = await database.sql`
+          SELECT requests.id, requests.user_id AS "userId", users.display_name AS "requesterName",
+            requests.current_subteam AS "currentSubteam", requests.requested_subteam AS "requestedSubteam",
+            requests.status, reviewer.display_name AS "reviewedBy", requests.created_at AS "createdAt",
+            requests.reviewed_at AS "reviewedAt"
+          FROM subteam_change_requests AS requests
+          JOIN users ON users.id = requests.user_id
+          LEFT JOIN users AS reviewer ON reviewer.id = requests.reviewed_by
+          WHERE requests.id = ${id}
+        `
+        return Response.json({ request: created }, { status: 201 })
+      }
+
+      const subteamChangeRequestId = getRouteId(pathname, '/api/subteam-change-requests/')
+      if (subteamChangeRequestId && method === 'PATCH') {
+        const parsed = await parseBody(request, subteamChangeReviewSchema)
+        if (parsed.response) return parsed.response
+        if (!canReviewSubteamChanges(session.user)) return jsonError('Only Exec members or Dev administrators can review subteam change requests.', 403)
+
+        const client = await database.pool.connect()
+        try {
+          await client.query('BEGIN')
+          const result = await client.query(
+            'SELECT user_id, requested_subteam, status FROM subteam_change_requests WHERE id = $1 FOR UPDATE',
+            [subteamChangeRequestId],
+          )
+          const subteamRequest = result.rows[0]
+          if (!subteamRequest) {
+            await client.query('ROLLBACK')
+            return jsonError('Subteam change request not found.', 404)
+          }
+          if (subteamRequest.user_id === session.user.id) {
+            await client.query('ROLLBACK')
+            return jsonError('You cannot review your own subteam change request.', 403)
+          }
+          if (subteamRequest.status !== 'pending') {
+            await client.query('ROLLBACK')
+            return jsonError('This subteam change request has already been reviewed.', 409)
+          }
+
+          const reviewedAt = new Date().toISOString()
+          await client.query(
+            `UPDATE subteam_change_requests
+             SET status = $1, reviewed_by = $2, reviewed_at = $3
+             WHERE id = $4 AND status = 'pending'`,
+            [parsed.data.status, session.user.id, reviewedAt, subteamChangeRequestId],
+          )
+          if (parsed.data.status === 'approved') {
+            await client.query('UPDATE users SET subteam = $1 WHERE id = $2', [subteamRequest.requested_subteam, subteamRequest.user_id])
+          }
+          await client.query('COMMIT')
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+
+        const [reviewed] = await database.sql`
+          SELECT requests.id, requests.user_id AS "userId", users.display_name AS "requesterName",
+            requests.current_subteam AS "currentSubteam", requests.requested_subteam AS "requestedSubteam",
+            requests.status, reviewer.display_name AS "reviewedBy", requests.created_at AS "createdAt",
+            requests.reviewed_at AS "reviewedAt"
+          FROM subteam_change_requests AS requests
+          JOIN users ON users.id = requests.user_id
+          LEFT JOIN users AS reviewer ON reviewer.id = requests.reviewed_by
+          WHERE requests.id = ${subteamChangeRequestId}
+        `
+        return Response.json({ request: reviewed })
+      }
+      if (subteamChangeRequestId && method === 'DELETE') {
+        const deleted = await database.sql`
+          DELETE FROM subteam_change_requests
+          WHERE id = ${subteamChangeRequestId} AND user_id = ${session.user.id} AND status = 'pending'
+          RETURNING id
+        `
+        return deleted.length
+          ? new Response(null, { status: 204 })
+          : jsonError('Pending subteam change request not found.', 404)
+      }
+
       if (pathname === '/api/account' && method === 'DELETE') {
         const parsed = await parseBody(request, accountDeleteSchema)
         if (parsed.response) return parsed.response

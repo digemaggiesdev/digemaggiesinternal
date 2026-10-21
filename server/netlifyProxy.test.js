@@ -7,6 +7,7 @@ import { createApiHandler } from '../netlify/functions/api.mjs'
 
 const migrationPath = fileURLToPath(new URL('../netlify/database/migrations/', import.meta.url))
 const inviteCode = 'netlify-function-test-invite'
+const devInviteCode = 'netlify-function-dev-invite'
 let netlifyDb
 let database
 let handler
@@ -16,7 +17,7 @@ before(async () => {
   const connectionString = await netlifyDb.start()
   await netlifyDb.applyMigrations(migrationPath)
   database = getDatabase({ connectionString })
-  handler = createApiHandler(database, { TEAM_INVITE_CODE: inviteCode })
+  handler = createApiHandler(database, { TEAM_INVITE_CODE: inviteCode, DEV_INVITE_CODE: devInviteCode })
 })
 
 after(async () => {
@@ -58,6 +59,7 @@ test('Netlify API health and authentication use the managed database', async () 
   assert.match(created.headers.get('set-cookie'), /HttpOnly/)
   const { user } = await created.json()
   assert.equal(user.subteam, account.subteam)
+  assert.equal(user.tag, 'member')
   const cookie = created.headers.get('set-cookie').split(';')[0]
 
   const session = await handler(jsonRequest('/api/auth/me', { cookie }))
@@ -93,11 +95,39 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal(businessRegistration.status, 201)
   const { user: businessUser } = await businessRegistration.clone().json()
   const businessCookie = businessRegistration.headers.get('set-cookie').split(';')[0]
+  const devRegistration = await handler(jsonRequest('/api/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Netlify Dev Administrator',
+      subteam: 'Business',
+      email: 'netlify-dev@example.com',
+      password: 'a-long-netlify-dev-password',
+      inviteCode: devInviteCode,
+    },
+  }))
+  assert.equal(devRegistration.status, 201)
+  const { user: devUser } = await devRegistration.clone().json()
+  assert.equal(devUser.tag, 'dev')
+  assert.equal(devUser.subteam, 'Business')
+  const devCookie = devRegistration.headers.get('set-cookie').split(';')[0]
+  const regularMemberCannotManage = await handler(jsonRequest('/api/management/users', { cookie }))
+  assert.equal(regularMemberCannotManage.status, 403)
+  const unauthorizedExecRegistration = await handler(jsonRequest('/api/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Unapproved Netlify Exec',
+      subteam: 'Exec',
+      email: 'unapproved-netlify-exec@example.com',
+      password: 'a-long-unapproved-exec-password',
+      inviteCode,
+    },
+  }))
+  assert.equal(unauthorizedExecRegistration.status, 400)
   const execRegistration = await handler(jsonRequest('/api/auth/register', {
     method: 'POST',
     body: {
       displayName: 'Netlify Exec Member',
-      subteam: 'Exec',
+      subteam: 'Controls',
       email: 'netlify-exec-member@example.com',
       password: 'a-long-netlify-exec-password',
       inviteCode,
@@ -106,6 +136,7 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal(execRegistration.status, 201)
   const { user: execUser } = await execRegistration.clone().json()
   const execCookie = execRegistration.headers.get('set-cookie').split(';')[0]
+  await database.sql`UPDATE users SET subteam = 'Exec' WHERE id = ${execUser.id}`
 
   const partInput = {
     item: 'Netlify Test Hydraulic Fitting', company: 'Test Supplier', link: '', contact: '', quantity: 2,
@@ -187,6 +218,11 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   ])
   const listedSponsors = await handler(jsonRequest('/api/sponsorships', { cookie }))
   assert.equal((await listedSponsors.json()).records[0].id, sponsor.id)
+  const managedSponsor = await handler(jsonRequest(`/api/management/sponsorships/${sponsor.id}`, {
+    method: 'PATCH', body: { contact: 'Dev edited Netlify sponsor' }, cookie: devCookie,
+  }))
+  assert.equal(managedSponsor.status, 200, await managedSponsor.clone().text())
+  assert.equal((await managedSponsor.json()).record.contact, 'Dev edited Netlify sponsor')
   const deletedSponsor = await handler(jsonRequest(`/api/sponsorships/${sponsor.id}`, { method: 'DELETE', cookie }))
   assert.equal(deletedSponsor.status, 204)
 
@@ -231,20 +267,104 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const listed = await handler(jsonRequest('/api/sponsor-leads', { cookie }))
   assert.equal((await listed.json()).records[0].company, input.company)
 
+  const directSubteamChange = await handler(jsonRequest('/api/account', {
+    method: 'PATCH',
+    body: { displayName: requester.displayName, email: requester.email, subteam: 'Exec' },
+    cookie,
+  }))
+  assert.equal(directSubteamChange.status, 400)
+  const forbiddenExecRequest = await handler(jsonRequest('/api/subteam-change-requests', {
+    method: 'POST', body: { subteam: 'Exec' }, cookie,
+  }))
+  assert.equal(forbiddenExecRequest.status, 400)
+  const subteamRequestResponse = await handler(jsonRequest('/api/subteam-change-requests', {
+    method: 'POST', body: { subteam: 'Software' }, cookie,
+  }))
+  assert.equal(subteamRequestResponse.status, 201)
+  const { request: subteamRequest } = await subteamRequestResponse.json()
+  assert.equal(subteamRequest.status, 'pending')
+  const nonExecReview = await handler(jsonRequest(`/api/subteam-change-requests/${subteamRequest.id}`, {
+    method: 'PATCH', body: { status: 'approved' }, cookie: businessCookie,
+  }))
+  assert.equal(nonExecReview.status, 403)
+  const execReview = await handler(jsonRequest(`/api/subteam-change-requests/${subteamRequest.id}`, {
+    method: 'PATCH', body: { status: 'approved' }, cookie: execCookie,
+  }))
+  assert.equal((await execReview.json()).request.status, 'approved')
+  const updatedSubteam = await handler(jsonRequest('/api/auth/me', { cookie }))
+  assert.equal((await updatedSubteam.json()).user.subteam, 'Software')
+  const rejectedSubteamRequest = await handler(jsonRequest('/api/subteam-change-requests', {
+    method: 'POST', body: { subteam: 'Controls' }, cookie,
+  }))
+  assert.equal(rejectedSubteamRequest.status, 201)
+  const { request: rejectedRequest } = await rejectedSubteamRequest.json()
+  const execReject = await handler(jsonRequest(`/api/subteam-change-requests/${rejectedRequest.id}`, {
+    method: 'PATCH', body: { status: 'rejected' }, cookie: execCookie,
+  }))
+  assert.equal((await execReject.json()).request.status, 'rejected')
+  const unchangedSubteam = await handler(jsonRequest('/api/auth/me', { cookie }))
+  assert.equal((await unchangedSubteam.json()).user.subteam, 'Software')
+  const execOwnRequest = await handler(jsonRequest('/api/subteam-change-requests', {
+    method: 'POST', body: { subteam: 'Business' }, cookie: execCookie,
+  }))
+  const { request: execSubteamRequest } = await execOwnRequest.json()
+  const execSelfReview = await handler(jsonRequest(`/api/subteam-change-requests/${execSubteamRequest.id}`, {
+    method: 'PATCH', body: { status: 'approved' }, cookie: execCookie,
+  }))
+  assert.equal(execSelfReview.status, 403)
+  const cancelExecRequest = await handler(jsonRequest(`/api/subteam-change-requests/${execSubteamRequest.id}`, {
+    method: 'DELETE', cookie: execCookie,
+  }))
+  assert.equal(cancelExecRequest.status, 204)
+
+  const devReviewRequestResponse = await handler(jsonRequest('/api/subteam-change-requests', {
+    method: 'POST', body: { subteam: 'Software' }, cookie: businessCookie,
+  }))
+  const { request: devReviewRequest } = await devReviewRequestResponse.json()
+  const devReview = await handler(jsonRequest(`/api/subteam-change-requests/${devReviewRequest.id}`, {
+    method: 'PATCH', body: { status: 'approved' }, cookie: devCookie,
+  }))
+  assert.equal((await devReview.json()).request.reviewedBy, devUser.displayName)
+  const managedUsersResponse = await handler(jsonRequest('/api/management/users', { cookie: devCookie }))
+  assert.equal(managedUsersResponse.status, 200)
+  const { users: managedUsers } = await managedUsersResponse.json()
+  assert.ok(managedUsers.some((member) => member.id === requester.id && member.tag === 'member'))
+  const assignedExec = await handler(jsonRequest(`/api/management/users/${businessUser.id}`, {
+    method: 'PATCH',
+    body: { displayName: businessUser.displayName, email: businessUser.email, subteam: 'Exec' },
+    cookie: devCookie,
+  }))
+  assert.equal((await assignedExec.json()).user.subteam, 'Exec')
+  const managedPart = await handler(jsonRequest(`/api/management/requests/${part.id}`, {
+    method: 'PATCH', body: { item: 'Dev edited netlify fitting', priority: 'Urgent' }, cookie: devCookie,
+  }))
+  assert.equal((await managedPart.json()).record.item, 'Dev edited netlify fitting')
+  const managedLead = await handler(jsonRequest(`/api/management/sponsor-leads/${record.id}`, {
+    method: 'PATCH', body: { details: 'Dev edited Netlify lead', status: 'Following up' }, cookie: devCookie,
+  }))
+  assert.equal((await managedLead.json()).record.details, 'Dev edited Netlify lead')
+  const devAccountUpdate = await handler(jsonRequest('/api/account', {
+    method: 'PATCH',
+    body: { displayName: 'Updated Netlify Dev', email: devUser.email },
+    cookie: devCookie,
+  }))
+  assert.equal((await devAccountUpdate.json()).user.tag, 'dev')
+
   const accountUpdate = await handler(jsonRequest('/api/account', {
     method: 'PATCH',
-    body: { displayName: 'Updated Netlify Member', email: 'updated-netlify-member@example.com', subteam: 'Controls' },
+    body: { displayName: 'Updated Netlify Member', email: 'updated-netlify-member@example.com' },
     cookie,
   }))
   assert.deepEqual((await accountUpdate.json()).user, {
     id: requester.id,
     email: 'updated-netlify-member@example.com',
     displayName: 'Updated Netlify Member',
-    subteam: 'Controls',
+    subteam: 'Software',
+    tag: 'member',
   })
   const duplicateEmail = await handler(jsonRequest('/api/account', {
     method: 'PATCH',
-    body: { displayName: 'Updated Netlify Member', email: 'netlify-business-member@example.com', subteam: 'Controls' },
+    body: { displayName: 'Updated Netlify Member', email: 'netlify-business-member@example.com' },
     cookie,
   }))
   assert.equal(duplicateEmail.status, 409)

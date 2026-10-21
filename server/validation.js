@@ -6,6 +6,8 @@ const sponsorStatuses = ['Prospect', 'Proposal sent', 'Committed', 'Received']
 const deliverableStatuses = ['Not started', 'In progress', 'Completed']
 const sponsorLeadStatuses = ['New', 'Following up', 'Contacted', 'Converted', 'Not pursuing']
 const sponsorSupportTypes = ['Financial', 'Parts / materials', 'Equipment', 'Services / expertise', 'Other']
+const memberSubteam = z.string().trim().min(1).max(100)
+  .refine((value) => value.toLowerCase() !== 'exec', 'Exec membership must be assigned by an administrator.')
 const optionalText = (max = 500) => z.string().trim().max(max).default('')
 const sponsorDeliverables = z.preprocess(
   (value) => Array.isArray(value) ? value.map((deliverable) => typeof deliverable === 'string' ? { description: deliverable, status: 'Not started' } : deliverable) : value,
@@ -17,7 +19,7 @@ const sponsorDeliverables = z.preprocess(
 
 export const registerSchema = z.object({
   displayName: z.string().trim().min(2).max(100),
-  subteam: z.string().trim().min(1).max(100),
+  subteam: memberSubteam,
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
   password: z.string().min(12).max(128),
   inviteCode: z.string().min(1).max(200),
@@ -30,8 +32,21 @@ export const loginSchema = z.object({
 
 export const accountPatchSchema = z.object({
   displayName: z.string().trim().min(2).max(100),
-  subteam: z.string().trim().min(1).max(100),
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
+}).strict()
+
+export const managementUserPatchSchema = z.object({
+  displayName: z.string().trim().min(2).max(100),
+  email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
+  subteam: z.string().trim().min(1).max(100),
+}).strict()
+
+export const subteamChangeRequestSchema = z.object({
+  subteam: memberSubteam,
+})
+
+export const subteamChangeReviewSchema = z.object({
+  status: z.enum(['approved', 'rejected']),
 })
 
 export const accountDeleteSchema = z.object({
@@ -55,6 +70,9 @@ export const partRequestSchema = z.object({
   recurring: z.boolean(),
   requestedBy: optionalText(100),
 })
+
+export const managementPartRequestPatchSchema = partRequestSchema.partial().strict()
+  .refine((value) => Object.keys(value).length > 0, 'Provide request details to update.')
 
 export const partRequestPatchSchema = z.object({
   status: z.enum(requestStatuses).optional(),
@@ -96,6 +114,11 @@ export const sponsorLeadSchema = z.object({
   estimatedAmount: z.number().min(0).max(100000000),
   canIntroduce: z.enum(['Yes', 'No', 'Not sure']),
 })
+
+export const managementSponsorLeadPatchSchema = sponsorLeadSchema.partial().extend({
+  status: z.enum(sponsorLeadStatuses).optional(),
+  assigneeId: z.string().trim().max(100).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, 'Provide sponsor lead details to update.')
 
 export const sponsorLeadPatchSchema = z.object({
   status: z.enum(sponsorLeadStatuses).optional(),

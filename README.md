@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. New local accounts use the development invite code `digem-dev-invite` unless `TEAM_INVITE_CODE` is set in `.env`.
+Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. New local member accounts use the development invite code `digem-dev-invite` unless `TEAM_INVITE_CODE` is set in `.env`. Set `DEV_INVITE_CODE` to a different private code to register a Dev administrator locally.
 
 Useful commands:
 
@@ -25,7 +25,7 @@ npm run build
 
 1. Connect this repository to your Netlify site and enable **Netlify Database** under the site's **Data & storage** settings. Netlify Database requires a credit-based plan.
 2. The repository includes `@netlify/database`, the `/api/*` function at `netlify/functions/api.mjs`, and the initial schema migration at `netlify/database/migrations/0001_initial_schema.sql`. Netlify applies migrations during deploy and provides `NETLIFY_DB_URL` to functions automatically.
-3. Set `TEAM_INVITE_CODE` as a private Netlify Functions runtime environment variable. Do not set it as a frontend build variable. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
+3. Set `TEAM_INVITE_CODE` and a different, unique `DEV_INVITE_CODE` as private Netlify Functions runtime environment variables. Do not set them as frontend build variables. The Dev invite assigns the Dev access tag while preserving the selected subteam. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
 4. Use `npm ci && npm run build` and `dist` as the publish directory; these are configured in `netlify.toml`.
 5. Deploy and check `https://<your-site>.netlify.app/api/health` returns `{"status":"ok"}`. Create the first account with the invite code.
 
@@ -33,9 +33,10 @@ Production sign-in, part requests, sponsor leads, and sponsorship records are ha
 
 ## Data and access
 
-- New member accounts require an invite code and record the member's subteam. Passwords are stored as salted, derived hashes; sessions expire after seven days.
-- Signed-in members can update their account name, email, and subteam from the Account page. Account deletion requires the current password, removes the profile, and unassigns their tasks while preserving shared records.
-- Any signed-in team member can read and update shared requests, sponsor leads, and sponsorships. Everyone can see task assignments; Business members and members of the original requester's subteam can assign themselves, while only Exec members can assign a task to another eligible person. Eligible assignees belong to the Business subteam or the original requester's subteam. There is no password-reset flow yet.
+- New member accounts require an invite code and record the member's subteam. A separate `DEV_INVITE_CODE` grants the Dev access tag without replacing the member's subteam. Keep both codes private and distinct. Passwords are stored as salted, derived hashes; sessions expire after seven days.
+- Signed-in members can update their account name and email from the Account page. Subteam changes require an in-app request and approval from an Exec member or Dev administrator; the current subteam stays active until approval. Exec membership can be assigned by a Dev administrator and cannot be self-selected during sign-up or requested in the app. Existing Exec assignments are preserved, so an administrator should verify them. Account deletion requires the current password, removes the profile, and unassigns their tasks while preserving shared records.
+- Dev administrators see a Management tab for editing any user’s name, email, and subteam (including Exec), and editing all fields on part requests, sponsorships, and sponsor leads. The Dev tag itself is only granted by the unique Dev invite code.
+- Any signed-in team member can read and update shared requests, sponsor leads, and sponsorships. Everyone can see task assignments; Business members and members of the original requester's subteam can assign themselves, Exec members can assign another eligible person, and Dev administrators can assign any team member. Eligible Exec assignees belong to the Business subteam or the original requester's subteam. There is no password-reset flow yet.
 - Members can delete part requests and sponsor leads after confirming; sponsorship records remain separate.
 - Sponsor leads can include multiple support types: financial contributions, parts and materials, equipment, services or expertise, and other offers. The cash estimate is optional.
 - CSV export opens in Excel or Google Sheets, but it is a snapshot rather than live spreadsheet synchronization.

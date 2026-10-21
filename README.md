@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. New local member accounts use the development invite code `digem-dev-invite` unless `TEAM_INVITE_CODE` is set in `.env`. Set `DEV_INVITE_CODE` to a different private code to register a Dev administrator locally.
+Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. New local member accounts use the development invite code `digem-dev-invite` unless `TEAM_INVITE_CODE` is set in `.env`. Set `DEV_INVITE_CODE` to a different private code for local Dev administrator access.
 
 Useful commands:
 
@@ -25,7 +25,7 @@ npm run build
 
 1. Connect this repository to your Netlify site and enable **Netlify Database** under the site's **Data & storage** settings. Netlify Database requires a credit-based plan.
 2. The repository includes `@netlify/database`, the `/api/*` function at `netlify/functions/api.mjs`, and the initial schema migration at `netlify/database/migrations/0001_initial_schema.sql`. Netlify applies migrations during deploy and provides `NETLIFY_DB_URL` to functions automatically.
-3. Set `TEAM_INVITE_CODE` and a different, unique `DEV_INVITE_CODE` as private Netlify Functions runtime environment variables. Do not set them as frontend build variables. The Dev invite assigns the Dev access tag while preserving the selected subteam. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
+3. Set `TEAM_INVITE_CODE` and a different, unique `DEV_INVITE_CODE` as private Netlify Functions runtime environment variables. Do not set them as frontend build variables. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
 4. Use `npm ci && npm run build` and `dist` as the publish directory; these are configured in `netlify.toml`.
 5. Deploy and check `https://<your-site>.netlify.app/api/health` returns `{"status":"ok"}`. Create the first account with the invite code.
 

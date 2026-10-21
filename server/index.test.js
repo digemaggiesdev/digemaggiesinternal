@@ -85,7 +85,7 @@ test('invite auth and shared records persist through the API', async () => {
   assert.match(registration.headers.get('set-cookie'), /HttpOnly/i)
   const sessionResponse = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
   assert.equal((await sessionResponse.json()).user.subteam, account.subteam)
-  const devRegistration = await fetch(`${baseUrl}/api/auth/register`, {
+  const devInviteRegistration = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -93,11 +93,30 @@ test('invite auth and shared records persist through the API', async () => {
       email: 'test-dev@example.com', password: 'a-long-dev-password', inviteCode: 'integration-test-dev-invite',
     }),
   })
+  assert.equal(devInviteRegistration.status, 403)
+  const devRegistration = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      displayName: 'Test Dev Administrator', subteam: 'Business',
+      email: 'test-dev@example.com', password: 'a-long-dev-password', inviteCode: 'integration-test-invite',
+    }),
+  })
   assert.equal(devRegistration.status, 201)
-  const { user: devUser } = await devRegistration.clone().json()
+  const { user: registeredDevCandidate } = await devRegistration.clone().json()
+  assert.equal(registeredDevCandidate.tag, 'member')
+  const devCookie = devRegistration.headers.get('set-cookie')?.split(';')[0]
+  const devPromotion = await fetch(`${baseUrl}/api/account`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ password: 'integration-test-dev-invite' }),
+  })
+  assert.equal(devPromotion.status, 200)
+  const { user: devUser } = await devPromotion.json()
   assert.equal(devUser.subteam, 'Business')
   assert.equal(devUser.tag, 'dev')
-  const devCookie = devRegistration.headers.get('set-cookie')?.split(';')[0]
+  const promotedSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: devCookie } })
+  assert.equal((await promotedSession.json()).user.tag, 'dev')
   const ordinaryCodeCannotGrantDev = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

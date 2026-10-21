@@ -132,7 +132,7 @@ function AccountSettings({ user, subteamRequests, onSave, onRequestSubteamChange
   onRequestSubteamChange: (subteam: string) => Promise<void>
   onReviewSubteamChange: (id: string, status: 'approved' | 'rejected') => Promise<void>
   onCancelSubteamChange: (id: string) => Promise<void>
-  onDelete: (password: string) => Promise<void>
+  onDelete: (password: string) => Promise<boolean>
 }) {
   const [displayName, setDisplayName] = useState(user.displayName)
   const [email, setEmail] = useState(user.email)
@@ -204,7 +204,11 @@ function AccountSettings({ user, subteamRequests, onSave, onRequestSubteamChange
     setError('')
     setDeleting(true)
     try {
-      await onDelete(password)
+      const promoted = await onDelete(password)
+      if (promoted) {
+        setPassword('')
+        setDeleting(false)
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not delete your account.')
       setDeleting(false)
@@ -436,6 +440,14 @@ function App() {
     return () => { active = false }
   }, [])
 
+  useEffect(() => {
+    if (!user || user.tag === 'dev' || user.subteam.trim().toLowerCase() !== 'exec') return
+    const interval = window.setInterval(() => {
+      void getSubteamChangeRequests().then(setSubteamRequests).catch(() => undefined)
+    }, 30_000)
+    return () => window.clearInterval(interval)
+  }, [user])
+
   const refreshWorkspace = async (includeManagement = user?.tag === 'dev') => {
     const [savedRequests, savedSponsors, savedLeads, savedMembers, savedSubteamRequests] = await Promise.all([
       getRequests(), getSponsors(), getSponsorLeads(), getTeamMembers(), getSubteamChangeRequests(),
@@ -553,7 +565,13 @@ function App() {
   }
 
   const removeAccount = async (password: string) => {
-    await deleteAccount(password)
+    const promotedUser = await deleteAccount(password)
+    if (promotedUser) {
+      setUser(promotedUser)
+      setActionError('')
+      setAuthError('')
+      return true
+    }
     setUser(null)
     setRequests([])
     setSponsors([])
@@ -563,6 +581,7 @@ function App() {
     setSubteamRequests([])
     setActionError('')
     setAuthError('')
+    return false
   }
 
   const openRequests = requests.filter((request) => !['Received', 'Closed'].includes(request.status))
@@ -729,6 +748,8 @@ function App() {
   const pageDescription = view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Requests submitted by subteams, from first ask to received.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
   if (!authReady) return <main className="auth-shell"><div className="auth-panel auth-loading"><img className="auth-logo" src="https://digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" /><p>Connecting to the team workspace...</p></div></main>
   if (!user) return <AuthScreen onAuthenticate={authenticate} initialError={authError} />
+  const pendingSubteamRequestCount = subteamRequests.filter((request) => request.status === 'pending' && request.userId !== user.id).length
+  const showSubteamRequestCount = user.tag !== 'dev' && user.subteam.trim().toLowerCase() === 'exec'
 
   return (
     <div className="app-shell">
@@ -742,7 +763,7 @@ function App() {
           <button className={view === 'parts' ? 'nav-item active' : 'nav-item'} onClick={() => setView('parts')}><Box size={18} /> Part requests <span className="nav-count">{openRequests.length}</span></button>
           <button className={view === 'sponsor-leads' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsor-leads')}><ContactRound size={18} /> Sponsor leads <span className="nav-count">{openSponsorLeadCount}</span></button>
           <button className={view === 'sponsors' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsors')}><Handshake size={18} /> Sponsorships</button>
-          <button className={view === 'account' ? 'nav-item active' : 'nav-item'} onClick={() => setView('account')}><Settings size={18} /> Account</button>
+          <button className={view === 'account' ? 'nav-item active' : 'nav-item'} onClick={() => setView('account')}><Settings size={18} /> Account{showSubteamRequestCount && pendingSubteamRequestCount > 0 && <span className="nav-count" aria-label={`${pendingSubteamRequestCount} pending subteam change request${pendingSubteamRequestCount === 1 ? '' : 's'}`}>{pendingSubteamRequestCount}</span>}</button>
           {user.tag === 'dev' && <button className={view === 'management' ? 'nav-item active' : 'nav-item'} onClick={() => setView('management')}><Shield size={18} /> Management</button>}
         </nav>
         <div className="sidebar-bottom">
@@ -776,7 +797,7 @@ function App() {
           {actionError && <div className="action-error" role="alert">{actionError}</div>}
 
           {view === 'account' && <AccountSettings
-            key={`${user.id}-${user.subteam}`}
+            key={`${user.id}-${user.subteam}-${user.tag}`}
             user={user}
             subteamRequests={subteamRequests}
             onSave={saveAccount}

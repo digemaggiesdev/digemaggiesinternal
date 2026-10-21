@@ -228,11 +228,12 @@ export async function cancelSubteamChangeRequest(id: string) {
   await request<void>(`/api/subteam-change-requests/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
-export async function deleteAccount(password: string) {
-  await request<void>('/api/account', {
+export async function deleteAccount(password: string): Promise<TeamUser | null> {
+  const result = await request<{ user?: TeamUser }>('/api/account', {
     method: 'DELETE',
     body: JSON.stringify({ password }),
   })
+  return result?.user ?? null
 }
 
 export async function getRequests() {

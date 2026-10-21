@@ -95,7 +95,7 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal(businessRegistration.status, 201)
   const { user: businessUser } = await businessRegistration.clone().json()
   const businessCookie = businessRegistration.headers.get('set-cookie').split(';')[0]
-  const devRegistration = await handler(jsonRequest('/api/auth/register', {
+  const devInviteRegistration = await handler(jsonRequest('/api/auth/register', {
     method: 'POST',
     body: {
       displayName: 'Netlify Dev Administrator',
@@ -105,11 +105,30 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
       inviteCode: devInviteCode,
     },
   }))
+  assert.equal(devInviteRegistration.status, 403)
+  const devRegistration = await handler(jsonRequest('/api/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Netlify Dev Administrator',
+      subteam: 'Business',
+      email: 'netlify-dev@example.com',
+      password: 'a-long-netlify-dev-password',
+      inviteCode,
+    },
+  }))
   assert.equal(devRegistration.status, 201)
-  const { user: devUser } = await devRegistration.clone().json()
+  const { user: registeredDevCandidate } = await devRegistration.clone().json()
+  assert.equal(registeredDevCandidate.tag, 'member')
+  const devCookie = devRegistration.headers.get('set-cookie').split(';')[0]
+  const devPromotion = await handler(jsonRequest('/api/account', {
+    method: 'DELETE', body: { password: devInviteCode }, cookie: devCookie,
+  }))
+  assert.equal(devPromotion.status, 200)
+  const { user: devUser } = await devPromotion.json()
   assert.equal(devUser.tag, 'dev')
   assert.equal(devUser.subteam, 'Business')
-  const devCookie = devRegistration.headers.get('set-cookie').split(';')[0]
+  const promotedSession = await handler(jsonRequest('/api/auth/me', { cookie: devCookie }))
+  assert.equal((await promotedSession.json()).user.tag, 'dev')
   const regularMemberCannotManage = await handler(jsonRequest('/api/management/users', { cookie }))
   assert.equal(regularMemberCannotManage.status, 403)
   const unauthorizedExecRegistration = await handler(jsonRequest('/api/auth/register', {

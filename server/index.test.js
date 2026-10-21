@@ -125,7 +125,9 @@ test('invite auth and shared records persist through the API', async () => {
       email: 'ordinary-member@example.com', password: 'a-long-ordinary-password', inviteCode: 'integration-test-invite',
     }),
   })
-  assert.equal((await ordinaryCodeCannotGrantDev.json()).user.tag, 'member')
+  const { user: ordinaryUser } = await ordinaryCodeCannotGrantDev.clone().json()
+  assert.equal(ordinaryUser.tag, 'member')
+  const ordinaryCookie = ordinaryCodeCannotGrantDev.headers.get('set-cookie')?.split(';')[0]
   const regularMemberManagement = await fetch(`${baseUrl}/api/management/users`, { headers: { Cookie: cookie } })
   assert.equal(regularMemberManagement.status, 403)
   const forbiddenExecRequest = await fetch(`${baseUrl}/api/subteam-change-requests`, {
@@ -498,6 +500,29 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ displayName: 'Updated Dev Administrator', email: 'test-dev@example.com' }),
   })
   assert.equal((await devAccountUpdate.json()).user.tag, 'dev')
+
+  const memberCannotDeleteUsers = await fetch(`${baseUrl}/api/management/users/${ordinaryUser.id}`, {
+    method: 'DELETE', headers: { Cookie: cookie },
+  })
+  assert.equal(memberCannotDeleteUsers.status, 403)
+  const devCannotDeleteSelf = await fetch(`${baseUrl}/api/management/users/${devUser.id}`, {
+    method: 'DELETE', headers: { Cookie: devCookie },
+  })
+  assert.equal(devCannotDeleteSelf.status, 403)
+  const assignedToManagedDeleteUser = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ assigneeId: ordinaryUser.id }),
+  })
+  assert.equal(assignedToManagedDeleteUser.status, 200)
+  const deletedManagedUser = await fetch(`${baseUrl}/api/management/users/${ordinaryUser.id}`, {
+    method: 'DELETE', headers: { Cookie: devCookie },
+  })
+  assert.equal(deletedManagedUser.status, 204)
+  const deletedManagedUserSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: ordinaryCookie } })
+  assert.equal(deletedManagedUserSession.status, 401)
+  const remainingPartsAfterManagedDelete = await fetch(`${baseUrl}/api/requests`, { headers: { Cookie: teammateCookie } })
+  assert.equal((await remainingPartsAfterManagedDelete.json()).records.find((record) => record.id === part.id).assigneeId, undefined)
 
   const accountUpdate = await fetch(`${baseUrl}/api/account`, {
     method: 'PATCH',

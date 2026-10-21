@@ -369,6 +369,40 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   }))
   assert.equal((await devAccountUpdate.json()).user.tag, 'dev')
 
+  const managedDeleteRegistration = await handler(jsonRequest('/api/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Netlify Member for Admin Delete',
+      subteam: 'Controls',
+      email: 'netlify-admin-delete@example.com',
+      password: 'a-long-netlify-delete-password',
+      inviteCode,
+    },
+  }))
+  assert.equal(managedDeleteRegistration.status, 201)
+  const { user: managedDeleteUser } = await managedDeleteRegistration.clone().json()
+  const managedDeleteCookie = managedDeleteRegistration.headers.get('set-cookie').split(';')[0]
+  const memberCannotDeleteUsers = await handler(jsonRequest(`/api/management/users/${managedDeleteUser.id}`, {
+    method: 'DELETE', cookie,
+  }))
+  assert.equal(memberCannotDeleteUsers.status, 403)
+  const devCannotDeleteSelf = await handler(jsonRequest(`/api/management/users/${devUser.id}`, {
+    method: 'DELETE', cookie: devCookie,
+  }))
+  assert.equal(devCannotDeleteSelf.status, 403)
+  const assignedToManagedDeleteUser = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { assigneeId: managedDeleteUser.id }, cookie: devCookie,
+  }))
+  assert.equal(assignedToManagedDeleteUser.status, 200)
+  const deletedManagedUser = await handler(jsonRequest(`/api/management/users/${managedDeleteUser.id}`, {
+    method: 'DELETE', cookie: devCookie,
+  }))
+  assert.equal(deletedManagedUser.status, 204)
+  const deletedManagedUserSession = await handler(jsonRequest('/api/auth/me', { cookie: managedDeleteCookie }))
+  assert.equal(deletedManagedUserSession.status, 401)
+  const remainingPartsAfterManagedDelete = await handler(jsonRequest('/api/requests', { cookie: businessCookie }))
+  assert.equal((await remainingPartsAfterManagedDelete.json()).records.find((item) => item.id === part.id).assigneeId, undefined)
+
   const accountUpdate = await handler(jsonRequest('/api/account', {
     method: 'PATCH',
     body: { displayName: 'Updated Netlify Member', email: 'updated-netlify-member@example.com' },

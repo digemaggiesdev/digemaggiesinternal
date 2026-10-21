@@ -327,6 +327,28 @@ export function createApiHandler(database, environment = process.env) {
       }
 
       const managedUserId = getRouteId(pathname, '/api/management/users/')
+      if (managedUserId && method === 'DELETE') {
+        if (managedUserId === session.user.id) return jsonError('You cannot delete your own account from management.', 403)
+        const client = await database.pool.connect()
+        try {
+          await client.query('BEGIN')
+          const target = await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [managedUserId])
+          if (!target.rowCount) {
+            await client.query('ROLLBACK')
+            return jsonError('Team member not found.', 404)
+          }
+          await client.query("UPDATE records SET data = data - 'assigneeId', updated_at = NOW() WHERE data->>'assigneeId' = $1", [managedUserId])
+          await client.query("UPDATE sponsor_leads SET data = data - 'assigneeId', updated_at = NOW() WHERE data->>'assigneeId' = $1", [managedUserId])
+          await client.query('DELETE FROM users WHERE id = $1', [managedUserId])
+          await client.query('COMMIT')
+          return new Response(null, { status: 204 })
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+      }
       if (managedUserId && method === 'PATCH') {
         const parsed = await parseBody(request, managementUserPatchSchema)
         if (parsed.response) return parsed.response

@@ -37,6 +37,7 @@ import {
   getSubteamChangeRequests,
   getManagementUsers,
   deleteAccount,
+  deleteManagementUser,
   cancelSubteamChangeRequest,
   requestSubteamChange,
   reviewSubteamChangeRequest,
@@ -263,12 +264,14 @@ function AccountSettings({ user, subteamRequests, onSave, onRequestSubteamChange
   </div>
 }
 
-function ManagementTab({ users, requests, sponsors, leads, onEditUser, onEditRequest, onEditSponsor, onEditLead }: {
+function ManagementTab({ users, currentUserId, requests, sponsors, leads, onEditUser, onDeleteUser, onEditRequest, onEditSponsor, onEditLead }: {
   users: TeamUser[]
+  currentUserId: string
   requests: PartRequest[]
   sponsors: Sponsor[]
   leads: SponsorLead[]
   onEditUser: (user: TeamUser) => void
+  onDeleteUser: (user: TeamUser) => void
   onEditRequest: (request: PartRequest) => void
   onEditSponsor: (sponsor: Sponsor) => void
   onEditLead: (lead: SponsorLead) => void
@@ -299,7 +302,10 @@ function ManagementTab({ users, requests, sponsors, leads, onEditUser, onEditReq
       <tbody>{users.map((member) => <tr key={member.id}>
         <td>{member.displayName}</td><td>{member.email}</td><td>{member.subteam || 'Not set'}</td>
         <td>{member.tag === 'dev' ? 'Dev' : 'Member'}</td>
-        <td><button className="button secondary management-edit-button" type="button" onClick={() => onEditUser(member)}><Pencil size={14} /> Edit</button></td>
+        <td><div className="management-user-actions">
+          <button className="button secondary management-edit-button" type="button" onClick={() => onEditUser(member)}><Pencil size={14} /> Edit</button>
+          {member.id !== currentUserId && <button className="button danger-button management-edit-button" type="button" onClick={() => onDeleteUser(member)}><Trash2 size={14} /> Delete</button>}
+        </div></td>
       </tr>)}</tbody>
     </table></div>}
     {section === 'requests' && <div className="table-scroll"><table>
@@ -365,7 +371,7 @@ function ManagementUserModal({ user, onClose, onSave }: {
           <div className="field"><span>Access tag</span><strong>{user.tag === 'dev' ? 'Dev (invite-assigned)' : 'Member'}</strong></div>
         </div>
         {error && <div className="action-error" role="alert">{error}</div>}
-        <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary" disabled={saving}>{saving ? 'Saving...' : 'Save member'}</button></div>
+        <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose} disabled={saving}>Cancel</button><button type="submit" className="button primary" disabled={saving}>{saving ? 'Saving...' : 'Save member'}</button></div>
       </form>
     </section>
   </div>
@@ -512,6 +518,23 @@ function App() {
       setActionError(error instanceof Error ? error.message : 'Could not update this member.')
       throw error
     }
+  }
+
+  const removeManagementUser = async (id: string) => {
+    try {
+      await deleteManagementUser(id)
+      setManagementUsers((current) => current.filter((member) => member.id !== id))
+      setTeamMembers((current) => current.filter((member) => member.id !== id))
+      setManagementEdit(null)
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not delete this member.')
+    }
+  }
+
+  const confirmDeleteManagementUser = (member: TeamUser) => {
+    if (!window.confirm(`Delete ${member.displayName}'s account? Their assigned tasks will be unassigned; shared records will remain.`)) return
+    void removeManagementUser(member.id)
   }
 
   const editManagementRequest = async (id: string, changes: PartRequestInput) => {
@@ -808,10 +831,12 @@ function App() {
           />}
           {view === 'management' && user.tag === 'dev' && <ManagementTab
             users={managementUsers}
+            currentUserId={user.id}
             requests={requests}
             sponsors={sponsors}
             leads={sponsorLeads}
             onEditUser={(member) => setManagementEdit({ kind: 'user', user: member })}
+            onDeleteUser={confirmDeleteManagementUser}
             onEditRequest={(record) => setManagementEdit({ kind: 'request', record })}
             onEditSponsor={(record) => setManagementEdit({ kind: 'sponsor', record })}
             onEditLead={(record) => setManagementEdit({ kind: 'lead', record })}

@@ -41,6 +41,7 @@
 .management-tab.active { border-bottom-color: #500000; color: #500000; }
 .management-tab span { border-radius: 10px; padding: 2px 6px; color: #6c766f; background: #f1f3ee; font-size: 10px; }
 .management-edit-button { min-height: 30px; padding: 0 9px; font-size: 10px; }
+.management-user-actions { display: flex; align-items: center; gap: 25px; }
 .management-panel table { min-width: 660px; }
 .danger-section { border-color: #ead4cd; }
 .danger-section .section-kicker { color: #a33a2d; }

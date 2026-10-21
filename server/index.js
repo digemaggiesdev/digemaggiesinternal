@@ -412,6 +412,23 @@ app.patch('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
   }
 })
 
+app.delete('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
+  if (req.params.id === req.user.id) return res.status(403).json({ error: 'You cannot delete your own account from management.' })
+  const deleteManagedUser = db.transaction(() => {
+    const target = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id)
+    if (!target) return false
+    const now = new Date().toISOString()
+    db.prepare("UPDATE records SET data = json_remove(data, '$.assigneeId'), updated_at = ? WHERE json_extract(data, '$.assigneeId') = ?")
+      .run(now, req.params.id)
+    db.prepare("UPDATE sponsor_leads SET data = json_remove(data, '$.assigneeId'), updated_at = ? WHERE json_extract(data, '$.assigneeId') = ?")
+      .run(now, req.params.id)
+    db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id)
+    return true
+  })
+  if (!deleteManagedUser()) return res.status(404).json({ error: 'Team member not found.' })
+  res.status(204).end()
+})
+
 app.patch('/api/management/requests/:id', requireAuth, requireDev, (req, res) => {
   const input = parseBody(managementPartRequestPatchSchema, req, res)
   if (!input) return

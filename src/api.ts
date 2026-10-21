@@ -179,6 +179,10 @@ export async function updateManagementUser(id: string, changes: Pick<TeamUser, '
   return result.user
 }
 
+export async function deleteManagementUser(id: string) {
+  await request<void>(`/api/management/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
 export async function updateManagementRequest(id: string, changes: Partial<PartRequestInput>) {
   const result = await request<{ record: PartRequest }>(`/api/management/requests/${encodeURIComponent(id)}`, {
     method: 'PATCH',

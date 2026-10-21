@@ -407,10 +407,11 @@ function App() {
   const [authError, setAuthError] = useState('')
   const [actionError, setActionError] = useState('')
   const [view, setView] = useState<View>('overview')
-  const [modal, setModal] = useState<'request' | 'lead' | 'lead-detail' | null>(null)
+  const [modal, setModal] = useState<'request' | 'lead' | 'lead-detail' | 'part-detail' | null>(null)
   const [sponsorModal, setSponsorModal] = useState<'sponsor' | 'sponsor-edit' | 'sponsor-detail' | null>(null)
   const [selectedSponsorId, setSelectedSponsorId] = useState<string | null>(null)
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null)
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
   const [managementEdit, setManagementEdit] = useState<ManagementEdit | null>(null)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('All statuses')
@@ -626,6 +627,7 @@ function App() {
   })
   const selectedSponsorLead = sponsorLeads.find((lead) => lead.id === selectedLeadId) ?? null
   const selectedSponsor = sponsors.find((sponsor) => sponsor.id === selectedSponsorId) ?? null
+  const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? null
   const openSponsorLeadCount = sponsorLeads.filter((lead) => !['Converted', 'Not pursuing'].includes(lead.status)).length
 
   const addRequest = async (request: PartRequestInput) => {
@@ -890,9 +892,9 @@ function App() {
                 <label className="select-control"><span className="sr-only">Sort part requests</span><select value={requestSort} onChange={(event) => setRequestSort(event.target.value as 'newest' | 'urgency')}><option value="newest">Sort: newest</option><option value="urgency">Sort: urgency</option></select><ChevronDown size={15} /></label>
               </div>
             </div>
-            <div className="table-scroll"><table><thead><tr><th>PART / COMPANY</th><th>SUBTEAM</th><th>PRIORITY</th><th>ASSIGNED TO</th><th>COMPATIBILITY</th><th>COMMUNICATION</th><th>PART STATUS</th><th>VALUE</th><th>ACTIONS</th></tr></thead><tbody>
+            <div className="table-scroll"><table className="part-request-table"><thead><tr><th>PART / COMPANY</th><th>SUBTEAM</th><th>PRIORITY</th><th>ASSIGNED TO</th><th>COMPATIBILITY</th><th>COMMUNICATION</th><th>PART STATUS</th><th>VALUE</th><th className="row-actions">ACTIONS</th></tr></thead><tbody>
               {filteredRequests.map((request) => <tr key={request.id}>
-                <td><div className="table-title">{request.link ? <a href={request.link} target="_blank" rel="noreferrer">{request.item} <ArrowUpRight size={12} /></a> : request.item}</div><div className="table-subtitle">{request.company} · {request.quantity} requested</div></td>
+                <td><button type="button" className="sponsor-detail-trigger" onClick={() => { setSelectedRequestId(request.id); setModal('part-detail') }} aria-label={`View details for ${request.item}`}><span className="table-title">{request.item} <Eye size={12} /></span><span className="table-subtitle">{request.company} · {request.quantity} requested</span></button></td>
                 <td>{request.subteam}</td><td><span className={`priority-label ${request.priority.toLowerCase()}`}><span />{request.priority}</span></td>
                 <td><AssignmentSelect assignedId={request.assigneeId} user={user} members={teamMembers} requesterSubteam={request.requesterSubteam || request.subteam} label={`Assignment for request ${request.item}`} onChange={(assigneeId) => void updateRequestAssignee(request.id, assigneeId)} /></td>
                 <td className="compat-cell" title={request.compatibility}>{request.compatibility || 'Not provided'}</td>
@@ -954,6 +956,7 @@ function App() {
       {sponsorModal === 'sponsor-detail' && selectedSponsor && <SponsorDetailsModal sponsor={selectedSponsor} onClose={() => setSponsorModal(null)} onEdit={() => setSponsorModal('sponsor-edit')} onDelete={() => void deleteSponsor(selectedSponsor)} onDeliverableStatusChange={updateDeliverableStatus} />}
       {modal === 'lead' && <SponsorLeadModal onClose={() => setModal(null)} onSave={addSponsorLead} />}
       {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} onClose={() => setModal(null)} onStatusChange={updateSponsorLeadStatus} />}
+      {modal === 'part-detail' && selectedRequest && <PartRequestDetailsModal request={selectedRequest} assignee={teamMembers.find((member) => member.id === selectedRequest.assigneeId)} onClose={() => setModal(null)} />}
       {managementEdit?.kind === 'user' && <ManagementUserModal
         key={managementEdit.user.id}
         user={managementEdit.user}
@@ -1134,6 +1137,21 @@ function SponsorLeadDetailsModal({ lead, onClose, onStatusChange }: { lead: Spon
       <section className="lead-details-section"><h3>Connection</h3><p>{lead.relationship}</p><div className="lead-detail-cash">Can introduce: <strong>{lead.canIntroduce}</strong></div></section>
       <section className="lead-details-section"><h3>Why they might support the team</h3><p>{lead.details}</p></section>
       <label className="lead-detail-status"><span>Business team follow-up</span><select className="inline-select" value={lead.status} onChange={(event) => void onStatusChange(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select></label>
+    </div>
+    <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Close</button></div>
+  </section></div>
+}
+
+function PartRequestDetailsModal({ request, assignee, onClose }: { request: PartRequest; assignee?: TeamMember; onClose: () => void }) {
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="part-details-title">
+    <div className="modal-heading"><div><span className="section-kicker">PART REQUEST</span><h2 id="part-details-title">{request.item}</h2><p>Submitted by {request.createdBy} · {request.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close part request details"><X size={19} /></button></div>
+    <div className="lead-details-content">
+      <section className="lead-details-section"><h3>Request</h3><p>{request.company || 'No company specified'} · {request.quantity} requested · {money(request.value)}</p><p>Requested by {request.requestedBy || 'Not specified'} · {request.subteam}{request.requesterSubteam && request.requesterSubteam !== request.subteam ? ` · Submitted from ${request.requesterSubteam}` : ''}</p></section>
+      <section className="lead-details-section"><h3>Status and priority</h3><p>{request.status} · {request.priority} priority · Communication: {request.communication} · {request.recurring ? 'Recurring need' : 'One-time need'}</p></section>
+      <section className="lead-details-section"><h3>Seller</h3><p>{request.contact || 'No seller contact specified'}</p><p>{request.relationship || 'No relationship details provided.'}</p>{request.link && <div className="lead-contact-links"><a href={request.link} target="_blank" rel="noreferrer">Open product link <ArrowUpRight size={12} /></a></div>}</section>
+      <section className="lead-details-section"><h3>Required specifications</h3><p>{request.specs || 'No required specifications provided.'}</p></section>
+      <section className="lead-details-section"><h3>Compatibility</h3><p>{request.compatibility || 'No compatibility details provided.'}</p></section>
+      <section className="lead-details-section"><h3>Assignment</h3><p>{assignee ? assignee.displayName : 'Unassigned'} · Request ID: {request.id}</p></section>
     </div>
     <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Close</button></div>
   </section></div>

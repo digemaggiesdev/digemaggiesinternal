@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. The local team invite code is `local-team-code`; set `TEAM_INVITE_CODE` in `.env` to override it. The local Dev invite code is `local-dev-code`; set `DEV_INVITE_CODE` to override it. To test emailed password reset links locally, configure `RESEND_API_KEY`, `RESEND_FROM` with a verified sender, and `APP_URL=http://localhost:5173` in `.env`, then restart the server.
+Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. The local team invite code is `local-team-code`; set `TEAM_INVITE_CODE` in `.env` to override it. The local Dev invite code is `local-dev-code`; set `DEV_INVITE_CODE` to override it. To send password reset and task assignment emails, configure `RESEND_API_KEY` and `RESEND_FROM` with a verified sender in `.env`; password reset links also use `APP_URL=http://localhost:5173`. Restart the server after changing environment variables.
 
 Useful commands:
 
@@ -25,7 +25,7 @@ npm run build
 
 1. Connect this repository to your Netlify site and enable **Netlify Database** under the site's **Data & storage** settings. Netlify Database requires a credit-based plan.
 2. The repository includes `@netlify/database`, the `/api/*` function at `netlify/functions/api.mjs`, and the initial schema migration at `netlify/database/migrations/0001_initial_schema.sql`. Netlify applies migrations during deploy and provides `NETLIFY_DB_URL` to functions automatically.
-3. Set `TEAM_INVITE_CODE` and a different, unique `DEV_INVITE_CODE` as private Netlify Functions runtime environment variables. For password reset emails, also set `RESEND_API_KEY`, `RESEND_FROM` (an address on a verified Resend domain), and `APP_URL` to your site's public URL. Keep these as server-side secrets; do not expose them as frontend build variables. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
+3. Set `TEAM_INVITE_CODE` and a different, unique `DEV_INVITE_CODE` as private Netlify Functions runtime environment variables. For password reset and task assignment emails, also set `RESEND_API_KEY` and `RESEND_FROM` (an address on a verified Resend domain); password reset links additionally require `APP_URL` set to your site's public URL. Keep these as server-side secrets; do not expose them as frontend build variables. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
 4. Use `npm ci && npm run build` and `dist` as the publish directory; these are configured in `netlify.toml`.
 5. Deploy and check `https://<your-site>.netlify.app/api/health` returns `{"status":"ok"}`. Create the first account with the invite code.
 

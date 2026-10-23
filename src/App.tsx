@@ -28,6 +28,8 @@ import {
   createRequest as createPartRequest,
   createSponsorLead,
   createSponsor as createSponsorship,
+  addRecordNote,
+  addSponsorNote,
   deleteSponsor as removeSponsor,
   getRequests,
   getSession,
@@ -37,7 +39,6 @@ import {
   getSubteamChangeRequests,
   getManagementUsers,
   deleteAccount,
-  deleteManagementUser,
   emailManagementUserPasswordReset,
   cancelSubteamChangeRequest,
   requestSubteamChange,
@@ -70,6 +71,7 @@ import type {
   SubteamChangeRequest,
   TeamMember,
   TeamUser,
+  RecordActivity,
 } from './api'
 import './App.css'
 
@@ -80,8 +82,161 @@ type ManagementEdit =
   | { kind: 'sponsor'; record: Sponsor }
   | { kind: 'lead'; record: SponsorLead }
 
+type AttentionItem = {
+  id: string
+  kind: 'part_request' | 'sponsorship' | 'sponsor_lead'
+  title: string
+  subtitle: string
+  reasons: string[]
+  nextFollowUpAt: string
+  assigneeId: string
+  status: RequestStatus | SponsorStatus | SponsorLeadStatus
+}
+
 function money(value: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value)
+}
+
+function recordAttention(
+  requests: PartRequest[],
+  sponsors: Sponsor[],
+  leads: SponsorLead[],
+  members: TeamMember[],
+  now = new Date(),
+): AttentionItem[] {
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const staleBefore = now.getTime() - 7 * 24 * 60 * 60 * 1000
+  const activeRequests = requests.filter((request) => !['Received', 'Closed'].includes(request.status))
+  const activeSponsors = sponsors.filter((sponsor) => sponsor.status !== 'Received')
+  const activeLeads = leads.filter((lead) => !['Converted', 'Not pursuing'].includes(lead.status))
+  return [
+    ...activeRequests.map((request): AttentionItem => {
+      const reasons: string[] = []
+      if (request.nextFollowUpAt && request.nextFollowUpAt < today) reasons.push('Follow-up overdue')
+      if (!request.assigneeId) reasons.push('Unassigned')
+      else if (!members.some((member) => member.id === request.assigneeId && member.active)) reasons.push('Assigned member inactive')
+      if (!request.nextFollowUpAt) reasons.push('Set follow-up date')
+      if (new Date(request.updatedAt || request.createdAt).getTime() < staleBefore) reasons.push('No recent activity')
+      const assignee = members.find((member) => member.id === request.assigneeId)
+      return { id: request.id, kind: 'part_request', title: request.item, subtitle: `${request.subteam} · ${assignee ? `${assignee.displayName}${assignee.active ? '' : ' (inactive)'}` : 'Unassigned'}`, reasons, nextFollowUpAt: request.nextFollowUpAt || '', assigneeId: request.assigneeId || '', status: request.status }
+    }),
+    ...activeSponsors.map((sponsor): AttentionItem => {
+      const reasons: string[] = []
+      if (sponsor.renewal && sponsor.renewal < today) reasons.push('Follow-up overdue')
+      if (!sponsor.renewal) reasons.push('Set renewal / follow-up date')
+      if (new Date(sponsor.updatedAt || sponsor.createdAt).getTime() < staleBefore) reasons.push('No recent activity')
+      return { id: sponsor.id, kind: 'sponsorship', title: sponsor.company, subtitle: `Sponsorship · ${sponsor.status} · ${money(sponsor.amount)}`, reasons, nextFollowUpAt: sponsor.renewal || '', assigneeId: '', status: sponsor.status }
+    }),
+    ...activeLeads.map((lead): AttentionItem => {
+      const reasons: string[] = []
+      if (lead.nextFollowUpAt && lead.nextFollowUpAt < today) reasons.push('Follow-up overdue')
+      if (!lead.assigneeId) reasons.push('Unassigned')
+      else if (!members.some((member) => member.id === lead.assigneeId && member.active)) reasons.push('Assigned member inactive')
+      if (!lead.nextFollowUpAt) reasons.push('Set follow-up date')
+      if (new Date(lead.updatedAt || lead.createdAt).getTime() < staleBefore) reasons.push('No recent activity')
+      const assignee = members.find((member) => member.id === lead.assigneeId)
+      return { id: lead.id, kind: 'sponsor_lead', title: lead.company, subtitle: `Sponsor lead · ${assignee ? `${assignee.displayName}${assignee.active ? '' : ' (inactive)'}` : 'Unassigned'}`, reasons, nextFollowUpAt: lead.nextFollowUpAt || '', assigneeId: lead.assigneeId || '', status: lead.status }
+    }),
+  ].filter((item) => item.reasons.length > 0)
+    .sort((first, second) => {
+      const firstOverdue = first.reasons.includes('Follow-up overdue') ? 0 : 1
+      const secondOverdue = second.reasons.includes('Follow-up overdue') ? 0 : 1
+      return firstOverdue - secondOverdue || first.title.localeCompare(second.title)
+    })
+}
+
+function ActivityPanel({ activity = [], canEdit, onAddNote }: {
+  activity?: RecordActivity[]
+  canEdit: boolean
+  onAddNote: (body: string) => Promise<void>
+}) {
+  const [note, setNote] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const body = note.trim()
+    if (!body) return
+    setError('')
+    setSaving(true)
+    try {
+      await onAddNote(body)
+      setNote('')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not save this note.')
+    } finally {
+      setSaving(false)
+    }
+  }
+  return <section className="lead-details-section activity-section">
+    <h3>Activity & notes</h3>
+    {canEdit && <form className="activity-note-form" onSubmit={(event) => void submit(event)}>
+      <textarea aria-label="Add a note" rows={2} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add a handoff note or follow-up context..." />
+      <button className="button secondary" disabled={saving || !note.trim()}>{saving ? 'Saving...' : 'Add note'}</button>
+    </form>}
+    {error && <div className="action-error" role="alert">{error}</div>}
+    {activity.length ? <ol className="activity-list">{[...activity].reverse().map((entry) => <li key={entry.id}>
+      <div><strong>{entry.actor}</strong><span>{entry.type === 'note' ? ' · Note' : ''}</span></div>
+      <p>{entry.body}</p><time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
+    </li>)}</ol> : <p className="activity-empty">No history yet.</p>}
+  </section>
+}
+
+function NeedsAttentionQueue({ items, user, members, onOpen, onFollowUpChange, onRequestStatusChange, onLeadStatusChange, onAssigneeChange }: {
+  items: AttentionItem[]
+  user: TeamUser
+  members: TeamMember[]
+  onOpen: (item: AttentionItem) => void
+  onFollowUpChange: (item: AttentionItem, date: string) => void
+  onRequestStatusChange: (id: string, status: RequestStatus) => void
+  onLeadStatusChange: (id: string, status: SponsorLeadStatus) => void
+  onAssigneeChange: (item: AttentionItem, assigneeId: string) => void
+}) {
+  const [category, setCategory] = useState<'all' | AttentionItem['kind']>('all')
+  const canEditStatusAndAssignee = user.tag === 'dev' || user.tag === 'stl'
+  const canEditFollowUp = canEditStatusAndAssignee || user.subteam.trim().toLowerCase() === 'exec'
+  const categoryItems = category === 'all' ? items : items.filter((item) => item.kind === category)
+  const categories: { value: typeof category; label: string; count: number }[] = [
+    { value: 'all', label: 'All', count: items.length },
+    { value: 'part_request', label: 'Part requests', count: items.filter((item) => item.kind === 'part_request').length },
+    { value: 'sponsorship', label: 'Sponsors', count: items.filter((item) => item.kind === 'sponsorship').length },
+    { value: 'sponsor_lead', label: 'Leads', count: items.filter((item) => item.kind === 'sponsor_lead').length },
+  ]
+  return <section className="section-block attention-queue" aria-label="Needs attention">
+    <div className="section-heading">
+      <div><span className="section-kicker">TEAM FOLLOW-UP</span><h2>Needs attention</h2></div>
+      <span className="attention-count">{categoryItems.length} {categoryItems.length === 1 ? 'item' : 'items'}</span>
+    </div>
+    <div className="attention-filters" role="group" aria-label="Filter needs attention by record type">
+      {categories.map((option) => <button type="button" key={option.value} className={category === option.value ? 'active' : ''} aria-pressed={category === option.value} onClick={() => setCategory(option.value)}>{option.label}<span>{option.count}</span></button>)}
+    </div>
+    {categoryItems.length ? <ul>{categoryItems.map((item) => <li key={`${item.kind}-${item.id}`}>
+      <div className="attention-item">
+        <button type="button" className="attention-item-open" onClick={() => onOpen(item)}>
+          <span className="attention-item-copy"><strong>{item.title}</strong><small>{item.subtitle}</small></span>
+          <span className="attention-reasons">{item.reasons.map((reason) => <span key={reason} className={reason === 'Follow-up overdue' ? 'overdue' : ''}>{reason}</span>)}</span>
+          <ArrowUpRight size={15} />
+        </button>
+        <div className="attention-controls">
+          <label><span>{item.kind === 'sponsorship' ? 'Renewal / follow-up' : 'Next follow-up'}</span><input type="date" aria-label={`${item.kind === 'sponsorship' ? 'Renewal or follow-up' : 'Next follow-up'} date for ${item.title}`} value={item.nextFollowUpAt} disabled={!canEditFollowUp} onChange={(event) => onFollowUpChange(item, event.target.value)} /></label>
+          {item.kind !== 'sponsorship' && <>
+            <label><span>Assigned to</span><select aria-label={`Assignment for ${item.title}`} value={item.assigneeId} disabled={!canEditStatusAndAssignee} onChange={(event) => onAssigneeChange(item, event.target.value)}>
+              <option value="">Unassigned</option>
+              {members.filter((member) => member.active).map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}</option>)}
+              {item.assigneeId && !members.some((member) => member.id === item.assigneeId && member.active) && <option value={item.assigneeId} disabled>{members.find((member) => member.id === item.assigneeId)?.displayName || 'Inactive member'} · inactive</option>}
+            </select></label>
+            {canEditStatusAndAssignee && <label><span>Status</span><select aria-label={`Status for ${item.title}`} value={item.status} onChange={(event) => item.kind === 'part_request'
+              ? onRequestStatusChange(item.id, event.target.value as RequestStatus)
+              : onLeadStatusChange(item.id, event.target.value as SponsorLeadStatus)}>
+              {(item.kind === 'part_request'
+                ? ['Needed', 'Outreach', 'In transit', 'Received', 'Closed'] as RequestStatus[]
+                : ['New', 'Following up', 'Contacted', 'Converted', 'Not pursuing'] as SponsorLeadStatus[]).map((status) => <option key={status}>{status}</option>)}
+            </select></label>}
+          </>}
+        </div>
+      </div>
+    </li>)}</ul> : <p className="attention-empty">{category === 'all' ? 'Nothing is overdue, unassigned, or waiting for a follow-up date.' : `No ${categories.find((option) => option.value === category)?.label.toLowerCase()} need attention.`}</p>}
+  </section>
 }
 
 function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, onChange }: {
@@ -95,16 +250,17 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
   const canEdit = user?.tag === 'dev' || user?.tag === 'stl'
   const userSubteam = user?.subteam.trim().toLowerCase() || ''
   const sourceSubteam = requesterSubteam.trim().toLowerCase()
+  const activeMembers = members.filter((member) => member.active)
   const visibleMembers = user?.tag === 'dev'
-    ? members
+    ? activeMembers
     : user?.tag === 'stl' && userSubteam === 'exec'
-      ? members.filter((member) => member.id === user.id || ['business', sourceSubteam].includes(member.subteam.trim().toLowerCase()))
+      ? activeMembers.filter((member) => member.id === user.id || ['business', sourceSubteam].includes(member.subteam.trim().toLowerCase()))
       : user?.tag === 'stl'
-        ? members.filter((member) => member.subteam.trim().toLowerCase() === userSubteam)
-        : members
+        ? activeMembers.filter((member) => member.subteam.trim().toLowerCase() === userSubteam)
+        : activeMembers
   const currentAssignee = members.find((member) => member.id === assignedId)
   const currentAssigneeLabel = currentAssignee
-    ? `${currentAssignee.displayName} · ${currentAssignee.subteam}`
+    ? `${currentAssignee.displayName} · ${currentAssignee.subteam}${currentAssignee.active ? '' : ' (inactive)'}`
     : assignedId ? 'Assigned member' : 'Unassigned'
 
   return <select
@@ -116,7 +272,7 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
   >
     <option value="">{canEdit ? 'Unassigned' : currentAssigneeLabel}</option>
     {visibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}{member.id === user?.id ? ' (You)' : ''}</option>)}
-    {assignedId && !members.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
+    {assignedId && !visibleMembers.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
   </select>
 }
 
@@ -258,25 +414,120 @@ function AccountSettings({ user, subteamRequests, onSave, onRequestSubteamChange
   </div>
 }
 
-function ManagementTab({ users, currentUserId, requests, sponsors, leads, onEditUser, onDeleteUser, onEditRequest, onEditSponsor, onEditLead }: {
+function ManagementTab({ users, members, currentUserId, requests, sponsors, leads, onEditUser, onToggleUserActive, onEditRequest, onEditSponsor, onEditLead, onBulkRequestUpdate, onBulkLeadUpdate }: {
   users: TeamUser[]
+  members: TeamMember[]
   currentUserId: string
   requests: PartRequest[]
   sponsors: Sponsor[]
   leads: SponsorLead[]
   onEditUser: (user: TeamUser) => void
-  onDeleteUser: (user: TeamUser) => void
+  onToggleUserActive: (user: TeamUser) => void
   onEditRequest: (request: PartRequest) => void
   onEditSponsor: (sponsor: Sponsor) => void
   onEditLead: (lead: SponsorLead) => void
+  onBulkRequestUpdate: (ids: string[], changes: { assigneeId?: string; status?: RequestStatus }) => Promise<void>
+  onBulkLeadUpdate: (ids: string[], changes: { assigneeId?: string; status?: SponsorLeadStatus }) => Promise<void>
 }) {
   const [section, setSection] = useState<'users' | 'requests' | 'sponsors' | 'leads'>('users')
+  const [userFilter, setUserFilter] = useState('all')
+  const [requestFilter, setRequestFilter] = useState('all')
+  const [sponsorFilter, setSponsorFilter] = useState('all')
+  const [leadFilter, setLeadFilter] = useState('all')
+  const [selectedRequestIds, setSelectedRequestIds] = useState<string[]>([])
+  const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>([])
+  const [bulkRequestAssignee, setBulkRequestAssignee] = useState('__unchanged')
+  const [bulkRequestStatus, setBulkRequestStatus] = useState('__unchanged')
+  const [bulkLeadAssignee, setBulkLeadAssignee] = useState('__unchanged')
+  const [bulkLeadStatus, setBulkLeadStatus] = useState('__unchanged')
+  const [bulkError, setBulkError] = useState('')
+  const [bulkSaving, setBulkSaving] = useState(false)
+  const subteams = [...new Map(users.filter((member) => member.subteam.trim()).map((member) => [
+    member.subteam.trim().toLocaleLowerCase(),
+    member.subteam.trim(),
+  ])).values()].sort((first, second) => first.localeCompare(second, undefined, { sensitivity: 'base' }))
+  const requestSubteams = [...new Map(requests.filter((record) => record.subteam.trim()).map((record) => [
+    record.subteam.trim().toLocaleLowerCase(),
+    record.subteam.trim(),
+  ])).values()].sort((first, second) => first.localeCompare(second, undefined, { sensitivity: 'base' }))
+  const leadSubteams = [...new Map(leads.filter((record) => record.subteam.trim()).map((record) => [
+    record.subteam.trim().toLocaleLowerCase(),
+    record.subteam.trim(),
+  ])).values()].sort((first, second) => first.localeCompare(second, undefined, { sensitivity: 'base' }))
+  const requestStatuses: PartRequest['status'][] = ['Needed', 'Outreach', 'In transit', 'Received', 'Closed']
+  const leadStatuses: SponsorLead['status'][] = ['New', 'Following up', 'Contacted', 'Converted', 'Not pursuing']
+  const sponsorStatuses: Sponsor['status'][] = ['Prospect', 'Proposal sent', 'Committed', 'Received']
+  const visibleRequests = requests
+    .filter((record) => {
+      if (requestFilter.startsWith('subteam:')) return record.subteam.trim().toLocaleLowerCase() === requestFilter.slice('subteam:'.length)
+      if (requestFilter.startsWith('status:')) return record.status === requestFilter.slice('status:'.length)
+      return true
+    })
+    .sort((first, second) => first.item.localeCompare(second.item, undefined, { sensitivity: 'base' }))
+  const visibleSponsors = sponsors
+    .filter((record) => sponsorFilter === 'all' || record.status === sponsorFilter)
+    .sort((first, second) => first.company.localeCompare(second.company, undefined, { sensitivity: 'base' }))
+  const visibleLeads = leads
+    .filter((record) => {
+      if (leadFilter.startsWith('subteam:')) return record.subteam.trim().toLocaleLowerCase() === leadFilter.slice('subteam:'.length)
+      if (leadFilter.startsWith('status:')) return record.status === leadFilter.slice('status:'.length)
+      return true
+    })
+    .sort((first, second) => first.company.localeCompare(second.company, undefined, { sensitivity: 'base' }))
+  const accessTags: TeamUser['tag'][] = ['member', 'stl', 'dev']
+  const visibleUsers = users
+    .filter((member) => {
+      if (userFilter.startsWith('subteam:')) {
+        return member.subteam.trim().toLocaleLowerCase() === userFilter.slice('subteam:'.length)
+      }
+      if (userFilter.startsWith('tag:')) return member.tag === userFilter.slice('tag:'.length)
+      return true
+    })
+    .sort((first, second) => first.displayName.localeCompare(second.displayName, undefined, { sensitivity: 'base' }))
   const sections = [
     { id: 'users' as const, label: 'Users', count: users.length },
     { id: 'requests' as const, label: 'Part requests', count: requests.length },
     { id: 'sponsors' as const, label: 'Sponsorships', count: sponsors.length },
     { id: 'leads' as const, label: 'Sponsor leads', count: leads.length },
   ]
+  const applyBulkRequestUpdate = async () => {
+    const changes = {
+      ...(bulkRequestAssignee !== '__unchanged' ? { assigneeId: bulkRequestAssignee } : {}),
+      ...(bulkRequestStatus !== '__unchanged' ? { status: bulkRequestStatus as RequestStatus } : {}),
+    }
+    if (!selectedRequestIds.length || !Object.keys(changes).length) return
+    setBulkSaving(true)
+    setBulkError('')
+    try {
+      await onBulkRequestUpdate(selectedRequestIds, changes)
+      setSelectedRequestIds([])
+      setBulkRequestAssignee('__unchanged')
+      setBulkRequestStatus('__unchanged')
+    } catch (caught) {
+      setBulkError(caught instanceof Error ? caught.message : 'Could not update selected requests.')
+    } finally {
+      setBulkSaving(false)
+    }
+  }
+  const applyBulkLeadUpdate = async () => {
+    const changes = {
+      ...(bulkLeadAssignee !== '__unchanged' ? { assigneeId: bulkLeadAssignee } : {}),
+      ...(bulkLeadStatus !== '__unchanged' ? { status: bulkLeadStatus as SponsorLeadStatus } : {}),
+    }
+    if (!selectedLeadIds.length || !Object.keys(changes).length) return
+    setBulkSaving(true)
+    setBulkError('')
+    try {
+      await onBulkLeadUpdate(selectedLeadIds, changes)
+      setSelectedLeadIds([])
+      setBulkLeadAssignee('__unchanged')
+      setBulkLeadStatus('__unchanged')
+    } catch (caught) {
+      setBulkError(caught instanceof Error ? caught.message : 'Could not update selected sponsor leads.')
+    } finally {
+      setBulkSaving(false)
+    }
+  }
 
   return <section className="section-block management-panel">
     <div className="section-heading"><div><span className="section-kicker">DEV ADMINISTRATION</span><h2>Manage workspace</h2></div></div>
@@ -291,38 +542,122 @@ function ManagementTab({ users, currentUserId, requests, sponsors, leads, onEdit
         onClick={() => setSection(item.id)}
       >{item.id === 'users' && <Users size={15} />}{item.label}<span>{item.count}</span></button>)}
     </div>
-    {section === 'users' && <div className="table-scroll"><table>
-      <thead><tr><th>NAME</th><th>EMAIL</th><th>SUBTEAM</th><th>ACCESS TAG</th><th>ACTIONS</th></tr></thead>
-      <tbody>{users.map((member) => <tr key={member.id}>
+    {section === 'users' && <>
+      <div className="management-sort-row">
+        <label className="select-control"><span>Show users</span><select aria-label="Filter users" value={userFilter} onChange={(event) => setUserFilter(event.target.value)}>
+          <option value="all">All users · alphabetical</option>
+          <optgroup label="Subteam">
+            {subteams.map((subteam) => <option key={subteam} value={`subteam:${subteam.toLocaleLowerCase()}`}>{subteam}</option>)}
+          </optgroup>
+          <optgroup label="Access tag">
+            {accessTags.map((tag) => <option key={tag} value={`tag:${tag}`}>{accessTagLabel(tag)}</option>)}
+          </optgroup>
+        </select><ChevronDown size={15} /></label>
+      </div>
+      <section className="workload-summary" aria-label="Open work by member">
+        <div className="workload-heading"><span className="section-kicker">OPEN WORK BY MEMBER</span><strong>Current workload</strong></div>
+        {members.filter((member) => member.active).map((member) => {
+          const requestCount = requests.filter((record) => record.assigneeId === member.id && !['Received', 'Closed'].includes(record.status)).length
+          const leadCount = leads.filter((record) => record.assigneeId === member.id && !['Converted', 'Not pursuing'].includes(record.status)).length
+          return <div className="workload-member" key={member.id}><strong>{member.displayName}</strong><span>{requestCount} requests · {leadCount} leads</span></div>
+        })}
+        {!members.length && <p>No active team members found.</p>}
+      </section>
+      <div className="table-scroll"><table>
+      <thead><tr><th>NAME</th><th>EMAIL</th><th>SUBTEAM</th><th>ACCESS TAG</th><th>ACCOUNT</th><th>ACTIONS</th></tr></thead>
+      <tbody>{visibleUsers.map((member) => <tr key={member.id}>
         <td>{member.displayName}</td><td>{member.email}</td><td>{member.subteam || 'Not set'}</td>
-        <td>{accessTagLabel(member.tag)}</td>
+        <td>{accessTagLabel(member.tag)}</td><td><span className={`account-state ${member.active ? 'active' : 'inactive'}`}>{member.active ? 'Active' : 'Deactivated'}</span></td>
         <td><div className="management-user-actions">
           <button className="button secondary management-edit-button" type="button" onClick={() => onEditUser(member)}><Pencil size={14} /> Edit</button>
-          {member.id !== currentUserId && <button className="button danger-button management-edit-button" type="button" onClick={() => onDeleteUser(member)}><Trash2 size={14} /> Delete</button>}
+          {member.id !== currentUserId && <button className={`button ${member.active ? 'danger-button' : 'secondary'} management-edit-button`} type="button" onClick={() => onToggleUserActive(member)}>{member.active ? 'Deactivate' : 'Reactivate'}</button>}
         </div></td>
       </tr>)}</tbody>
-    </table></div>}
-    {section === 'requests' && <div className="table-scroll"><table>
-      <thead><tr><th>ITEM</th><th>COMPANY</th><th>SUBTEAM</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
-      <tbody>{requests.map((record) => <tr key={record.id}>
-        <td>{record.item}</td><td>{record.company || '—'}</td><td>{record.subteam}</td><td>{record.status}</td>
+      </table></div>
+      {visibleUsers.length === 0 && <div className="empty-state">No users match this subteam or access tag.</div>}
+    </>}
+    {section === 'requests' && <>
+      <div className="management-sort-row">
+        <label className="select-control"><span>Show requests</span><select aria-label="Filter managed part requests" value={requestFilter} onChange={(event) => setRequestFilter(event.target.value)}>
+          <option value="all">All subteams · alphabetical</option>
+          <optgroup label="Subteam">
+            {requestSubteams.map((subteam) => <option key={subteam} value={`subteam:${subteam.toLocaleLowerCase()}`}>{subteam}</option>)}
+          </optgroup>
+          <optgroup label="Status">
+            {requestStatuses.map((status) => <option key={status} value={`status:${status}`}>{status}</option>)}
+          </optgroup>
+        </select><ChevronDown size={15} /></label>
+      </div>
+      <div className="bulk-toolbar">
+        <strong>{selectedRequestIds.length} selected</strong>
+        <label className="select-control"><span className="sr-only">Assign selected requests</span><select aria-label="Assign selected requests" value={bulkRequestAssignee} onChange={(event) => setBulkRequestAssignee(event.target.value)}>
+          <option value="__unchanged">Assignment: no change</option><option value="">Unassigned</option>
+          {members.filter((member) => member.active).map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}</option>)}
+        </select><ChevronDown size={15} /></label>
+        <label className="select-control"><span className="sr-only">Set selected request status</span><select aria-label="Set selected request status" value={bulkRequestStatus} onChange={(event) => setBulkRequestStatus(event.target.value)}>
+          <option value="__unchanged">Status: no change</option>{requestStatuses.map((status) => <option key={status}>{status}</option>)}
+        </select><ChevronDown size={15} /></label>
+        <button type="button" className="button secondary management-edit-button" disabled={bulkSaving || !selectedRequestIds.length || (bulkRequestAssignee === '__unchanged' && bulkRequestStatus === '__unchanged')} onClick={() => void applyBulkRequestUpdate()}>{bulkSaving ? 'Updating...' : 'Apply to selected'}</button>
+      </div>
+      {bulkError && <div className="action-error" role="alert">{bulkError}</div>}
+      <div className="table-scroll"><table>
+      <thead><tr><th><input type="checkbox" aria-label="Select all visible requests" checked={visibleRequests.length > 0 && visibleRequests.every((record) => selectedRequestIds.includes(record.id))} onChange={(event) => setSelectedRequestIds(event.target.checked ? [...new Set([...selectedRequestIds, ...visibleRequests.map((record) => record.id)])] : selectedRequestIds.filter((id) => !visibleRequests.some((record) => record.id === id)))} /></th><th>ITEM</th><th>COMPANY</th><th>SUBTEAM</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
+      <tbody>{visibleRequests.map((record) => <tr key={record.id}>
+        <td><input type="checkbox" aria-label={`Select request ${record.item}`} checked={selectedRequestIds.includes(record.id)} onChange={(event) => setSelectedRequestIds(event.target.checked ? [...new Set([...selectedRequestIds, record.id])] : selectedRequestIds.filter((id) => id !== record.id))} /></td><td>{record.item}</td><td>{record.company || '—'}</td><td>{record.subteam}</td><td>{record.status}</td>
         <td><button className="button secondary management-edit-button" type="button" onClick={() => onEditRequest(record)}><Pencil size={14} /> Edit</button></td>
       </tr>)}</tbody>
-    </table></div>}
-    {section === 'sponsors' && <div className="table-scroll"><table>
+      </table></div>
+      {visibleRequests.length === 0 && requests.length > 0 && <div className="empty-state">No part requests match this subteam.</div>}
+    </>}
+    {section === 'sponsors' && <>
+      <div className="management-sort-row">
+        <label className="select-control"><span>Show sponsorships</span><select aria-label="Filter managed sponsorships" value={sponsorFilter} onChange={(event) => setSponsorFilter(event.target.value)}>
+          <option value="all">All statuses · alphabetical</option>
+          {sponsorStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+        </select><ChevronDown size={15} /></label>
+      </div>
+      <div className="table-scroll"><table>
       <thead><tr><th>COMPANY</th><th>CONTACT</th><th>AMOUNT</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
-      <tbody>{sponsors.map((record) => <tr key={record.id}>
+      <tbody>{visibleSponsors.map((record) => <tr key={record.id}>
         <td>{record.company}</td><td>{record.contact || '—'}</td><td>{money(record.amount)}</td><td>{record.status}</td>
         <td><button className="button secondary management-edit-button" type="button" onClick={() => onEditSponsor(record)}><Pencil size={14} /> Edit</button></td>
       </tr>)}</tbody>
-    </table></div>}
-    {section === 'leads' && <div className="table-scroll"><table>
-      <thead><tr><th>COMPANY</th><th>CONTACT</th><th>SUBTEAM</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
-      <tbody>{leads.map((record) => <tr key={record.id}>
-        <td>{record.company}</td><td>{record.contactName || '—'}</td><td>{record.subteam || '—'}</td><td>{record.status}</td>
+      </table></div>
+      {visibleSponsors.length === 0 && sponsors.length > 0 && <div className="empty-state">No sponsorships match this status.</div>}
+    </>}
+    {section === 'leads' && <>
+      <div className="management-sort-row">
+        <label className="select-control"><span>Show leads</span><select aria-label="Filter managed sponsor leads" value={leadFilter} onChange={(event) => setLeadFilter(event.target.value)}>
+          <option value="all">All subteams · alphabetical</option>
+          <optgroup label="Subteam">
+            {leadSubteams.map((subteam) => <option key={subteam} value={`subteam:${subteam.toLocaleLowerCase()}`}>{subteam}</option>)}
+          </optgroup>
+          <optgroup label="Status">
+            {leadStatuses.map((status) => <option key={status} value={`status:${status}`}>{status}</option>)}
+          </optgroup>
+        </select><ChevronDown size={15} /></label>
+      </div>
+      <div className="bulk-toolbar">
+        <strong>{selectedLeadIds.length} selected</strong>
+        <label className="select-control"><span className="sr-only">Assign selected sponsor leads</span><select aria-label="Assign selected sponsor leads" value={bulkLeadAssignee} onChange={(event) => setBulkLeadAssignee(event.target.value)}>
+          <option value="__unchanged">Assignment: no change</option><option value="">Unassigned</option>
+          {members.filter((member) => member.active).map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}</option>)}
+        </select><ChevronDown size={15} /></label>
+        <label className="select-control"><span className="sr-only">Set selected sponsor lead status</span><select aria-label="Set selected sponsor lead status" value={bulkLeadStatus} onChange={(event) => setBulkLeadStatus(event.target.value)}>
+          <option value="__unchanged">Status: no change</option>{leadStatuses.map((status) => <option key={status}>{status}</option>)}
+        </select><ChevronDown size={15} /></label>
+        <button type="button" className="button secondary management-edit-button" disabled={bulkSaving || !selectedLeadIds.length || (bulkLeadAssignee === '__unchanged' && bulkLeadStatus === '__unchanged')} onClick={() => void applyBulkLeadUpdate()}>{bulkSaving ? 'Updating...' : 'Apply to selected'}</button>
+      </div>
+      {bulkError && <div className="action-error" role="alert">{bulkError}</div>}
+      <div className="table-scroll"><table>
+      <thead><tr><th><input type="checkbox" aria-label="Select all visible sponsor leads" checked={visibleLeads.length > 0 && visibleLeads.every((record) => selectedLeadIds.includes(record.id))} onChange={(event) => setSelectedLeadIds(event.target.checked ? [...new Set([...selectedLeadIds, ...visibleLeads.map((record) => record.id)])] : selectedLeadIds.filter((id) => !visibleLeads.some((record) => record.id === id)))} /></th><th>COMPANY</th><th>CONTACT</th><th>SUBTEAM</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
+      <tbody>{visibleLeads.map((record) => <tr key={record.id}>
+        <td><input type="checkbox" aria-label={`Select sponsor lead ${record.company}`} checked={selectedLeadIds.includes(record.id)} onChange={(event) => setSelectedLeadIds(event.target.checked ? [...new Set([...selectedLeadIds, record.id])] : selectedLeadIds.filter((id) => id !== record.id))} /></td><td>{record.company}</td><td>{record.contactName || '—'}</td><td>{record.subteam || '—'}</td><td>{record.status}</td>
         <td><button className="button secondary management-edit-button" type="button" onClick={() => onEditLead(record)}><Pencil size={14} /> Edit</button></td>
       </tr>)}</tbody>
-    </table></div>}
+      </table></div>
+      {visibleLeads.length === 0 && leads.length > 0 && <div className="empty-state">No sponsor leads match this subteam.</div>}
+    </>}
     {((section === 'users' && users.length === 0)
       || (section === 'requests' && requests.length === 0)
       || (section === 'sponsors' && sponsors.length === 0)
@@ -337,7 +672,7 @@ function accessTagLabel(tag: TeamUser['tag']) {
 function ManagementUserModal({ user, onClose, onSave, onSendPasswordReset }: {
   user: TeamUser
   onClose: () => void
-  onSave: (changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl' }) => Promise<void>
+  onSave: (changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl'; active?: boolean }) => Promise<void>
   onSendPasswordReset: () => Promise<void>
 }) {
   const [displayName, setDisplayName] = useState(user.displayName)
@@ -406,10 +741,10 @@ function ManagementUserModal({ user, onClose, onSave, onSendPasswordReset }: {
 function downloadCsv(requests: PartRequest[], sponsors: Sponsor[], leads: SponsorLead[], members: TeamMember[]) {
   const memberNames = new Map(members.map((member) => [member.id, member.displayName]))
   const rows = [
-    ['Type', 'Company / entity', 'Item / contact', 'Contact info', 'Amount', 'Quantity', 'Subteam', 'Priority / status', 'Assigned to', 'Compatibility / relationship', 'Communication', 'Renewal / required specs'],
-    ...requests.map((request) => ['Part request', request.company, request.item, request.contact, request.value, request.quantity, request.subteam, `${request.priority} / ${request.status}`, memberNames.get(request.assigneeId || '') || '', request.compatibility, request.communication, request.specs]),
-    ...sponsors.map((sponsor) => ['Sponsorship', sponsor.company, sponsor.contact, '', sponsor.amount, '', '', sponsor.status, '', sponsor.relationship, '', `${sponsor.renewal} / ${sponsor.deliverables.map((deliverable) => `${deliverable.description} (${deliverable.status})`).join('; ')}`]),
-    ...leads.map((lead) => ['Sponsor lead', lead.company, lead.contactName, [lead.contactRole, lead.contactEmail, lead.contactPhone].filter(Boolean).join('; '), lead.estimatedAmount || '', '', lead.subteam, lead.status, memberNames.get(lead.assigneeId || '') || '', lead.relationship, `Support: ${(lead.supportTypes || []).join(', ')}; can introduce: ${lead.canIntroduce}`, `${lead.supportDetails || ''} ${lead.details}`.trim()]),
+    ['Type', 'Company / entity', 'Item / contact', 'Contact info', 'Amount', 'Quantity', 'Subteam', 'Priority / status', 'Assigned to', 'Compatibility / relationship', 'Communication', 'Next follow-up', 'Renewal / required specs'],
+    ...requests.map((request) => ['Part request', request.company, request.item, request.contact, request.value, request.quantity, request.subteam, `${request.priority} / ${request.status}`, memberNames.get(request.assigneeId || '') || '', request.compatibility, request.communication, request.nextFollowUpAt || '', request.specs]),
+    ...sponsors.map((sponsor) => ['Sponsorship', sponsor.company, sponsor.contact, '', sponsor.amount, '', '', sponsor.status, '', sponsor.relationship, '', sponsor.renewal, sponsor.deliverables.map((deliverable) => `${deliverable.description} (${deliverable.status})`).join('; ')]),
+    ...leads.map((lead) => ['Sponsor lead', lead.company, lead.contactName, [lead.contactRole, lead.contactEmail, lead.contactPhone].filter(Boolean).join('; '), lead.estimatedAmount || '', '', lead.subteam, lead.status, memberNames.get(lead.assigneeId || '') || '', lead.relationship, `Support: ${(lead.supportTypes || []).join(', ')}; can introduce: ${lead.canIntroduce}`, lead.nextFollowUpAt || '', `${lead.supportDetails || ''} ${lead.details}`.trim()]),
   ]
   const csv = rows.map((row) => row.map((cell) => {
     const safe = String(cell ?? '').replace(/^[=+\-@]/, "'$&")
@@ -532,13 +867,15 @@ function App() {
       : member))
   }
 
-  const saveManagementUser = async (id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl' }) => {
+  const saveManagementUser = async (id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl'; active?: boolean }) => {
     try {
       const updated = await updateManagementUser(id, changes)
       setManagementUsers((current) => current.map((member) => member.id === updated.id ? updated : member))
-      setTeamMembers((current) => current.map((member) => member.id === updated.id
-        ? { ...member, displayName: updated.displayName, subteam: updated.subteam }
-        : member))
+      setTeamMembers((current) => updated.active
+        ? current.some((member) => member.id === updated.id)
+          ? current.map((member) => member.id === updated.id ? { ...member, displayName: updated.displayName, subteam: updated.subteam, active: true } : member)
+          : [...current, { id: updated.id, displayName: updated.displayName, subteam: updated.subteam, active: true }]
+        : current.map((member) => member.id === updated.id ? { ...member, active: false } : member))
       if (user?.id === updated.id) setUser(updated)
       setManagementEdit(null)
       setActionError('')
@@ -552,25 +889,42 @@ function App() {
     await emailManagementUserPasswordReset(id)
   }
 
+  const bulkUpdateRequests = async (ids: string[], changes: { assigneeId?: string; status?: RequestStatus }) => {
+    const results = await Promise.allSettled(ids.map(async (id) => updatePartRequest(id, changes)))
+    const updated = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
+    setRequests((current) => current.map((record) => updated.find((next) => next.id === record.id) || record))
+    const failed = results.filter((result) => result.status === 'rejected').length
+    if (failed) {
+      await refreshWorkspace()
+      throw new Error(`Updated ${updated.length} requests; ${failed} could not be updated.`)
+    }
+    setActionError('')
+  }
+
+  const bulkUpdateLeads = async (ids: string[], changes: { assigneeId?: string; status?: SponsorLeadStatus }) => {
+    const results = await Promise.allSettled(ids.map(async (id) => updateSponsorLead(id, changes)))
+    const updated = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
+    setSponsorLeads((current) => current.map((record) => updated.find((next) => next.id === record.id) || record))
+    const failed = results.filter((result) => result.status === 'rejected').length
+    if (failed) {
+      await refreshWorkspace()
+      throw new Error(`Updated ${updated.length} sponsor leads; ${failed} could not be updated.`)
+    }
+    setActionError('')
+  }
+
   const finishPasswordReset = async (token: string, password: string) => {
     await resetPassword(token, password)
   }
 
-  const removeManagementUser = async (id: string) => {
+  const toggleManagementUserActive = async (member: TeamUser) => {
+    const active = !member.active
+    if (!window.confirm(`${active ? 'Reactivate' : 'Deactivate'} ${member.displayName}'s account? ${active ? 'They will be able to sign in again.' : 'They will be signed out, but their past activity and assignments will remain.'}`)) return
     try {
-      await deleteManagementUser(id)
-      setManagementUsers((current) => current.filter((member) => member.id !== id))
-      setTeamMembers((current) => current.filter((member) => member.id !== id))
-      setManagementEdit(null)
-      setActionError('')
+      await saveManagementUser(member.id, { displayName: member.displayName, email: member.email, subteam: member.subteam, active })
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not delete this member.')
+      setActionError(error instanceof Error ? error.message : `Could not ${active ? 'reactivate' : 'deactivate'} this member.`)
     }
-  }
-
-  const confirmDeleteManagementUser = (member: TeamUser) => {
-    if (!window.confirm(`Delete ${member.displayName}'s account? Their assigned tasks will be unassigned; shared records will remain.`)) return
-    void removeManagementUser(member.id)
   }
 
   const editManagementRequest = async (id: string, changes: PartRequestInput) => {
@@ -745,8 +1099,12 @@ function App() {
     }
   }
 
-  const updateRequest = async (id: string, field: 'status' | 'communication', value: string) => {
-    const changes = field === 'status' ? { status: value as RequestStatus } : { communication: value as CommunicationStatus }
+  const updateRequest = async (id: string, field: 'status' | 'communication' | 'nextFollowUpAt', value: string) => {
+    const changes = field === 'status'
+      ? { status: value as RequestStatus }
+      : field === 'communication'
+        ? { communication: value as CommunicationStatus }
+        : { nextFollowUpAt: value }
     try {
       const updated = await updatePartRequest(id, changes)
       setRequests((current) => current.map((request) => request.id === id ? updated : request))
@@ -776,6 +1134,36 @@ function App() {
     }
   }
 
+  const updateRequestFollowUp = async (id: string, nextFollowUpAt: string) => {
+    try {
+      const updated = await updatePartRequest(id, { nextFollowUpAt })
+      setRequests((current) => current.map((request) => request.id === id ? updated : request))
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not update the request follow-up date.')
+    }
+  }
+
+  const updateSponsorLeadFollowUp = async (id: string, nextFollowUpAt: string) => {
+    try {
+      const updated = await updateSponsorLead(id, { nextFollowUpAt })
+      setSponsorLeads((current) => current.map((lead) => lead.id === id ? updated : lead))
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not update the sponsor lead follow-up date.')
+    }
+  }
+
+  const updateSponsorFollowUp = async (id: string, renewal: string) => {
+    try {
+      const updated = await updateSponsorship(id, { renewal })
+      setSponsors((current) => current.map((sponsor) => sponsor.id === id ? updated : sponsor))
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not update the sponsorship follow-up date.')
+    }
+  }
+
   const updateSponsorLeadAssignee = async (id: string, assigneeId: string) => {
     try {
       const updated = await updateSponsorLead(id, { assigneeId })
@@ -783,6 +1171,25 @@ function App() {
       setActionError('')
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not delegate this sponsor lead.')
+    }
+  }
+
+  const addRecordNoteTo = async (kind: 'part_request' | 'sponsor_lead' | 'sponsorship', id: string, body: string) => {
+    try {
+      if (kind === 'sponsorship') {
+        const updated = await addSponsorNote(id, body)
+        setSponsors((current) => current.map((record) => record.id === id ? updated : record))
+      } else if (kind === 'part_request') {
+        const updated = await addRecordNote(kind, id, body)
+        setRequests((current) => current.map((record) => record.id === id ? updated : record))
+      } else {
+        const updated = await addRecordNote(kind, id, body)
+        setSponsorLeads((current) => current.map((record) => record.id === id ? updated : record))
+      }
+      setActionError('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not save this note.')
+      throw error
     }
   }
 
@@ -872,15 +1279,18 @@ function App() {
           />}
           {view === 'management' && user.tag === 'dev' && <ManagementTab
             users={managementUsers}
+            members={teamMembers}
             currentUserId={user.id}
             requests={requests}
             sponsors={sponsors}
             leads={sponsorLeads}
             onEditUser={(member) => setManagementEdit({ kind: 'user', user: member })}
-            onDeleteUser={confirmDeleteManagementUser}
+            onToggleUserActive={(member) => void toggleManagementUserActive(member)}
             onEditRequest={(record) => setManagementEdit({ kind: 'request', record })}
             onEditSponsor={(record) => setManagementEdit({ kind: 'sponsor', record })}
             onEditLead={(record) => setManagementEdit({ kind: 'lead', record })}
+            onBulkRequestUpdate={bulkUpdateRequests}
+            onBulkLeadUpdate={bulkUpdateLeads}
           />}
 
           {view === 'overview' && <>
@@ -890,6 +1300,34 @@ function App() {
               <article className="metric"><div className="metric-top"><span>COMMITTED SUPPORT</span><BadgeDollarSign size={17} /></div><strong>{money(activeValue)}</strong><small>Committed or received</small></article>
               <article className="metric accent-metric"><div className="metric-top"><span>SPONSOR LEADS TO FOLLOW</span><ContactRound size={17} /></div><strong>{openSponsorLeadCount}</strong><small>{sponsorLeads.filter((lead) => lead.status === 'New').length} new for the business team</small></article>
             </section>
+            {(user.tag === 'dev' || user.subteam.trim().toLowerCase() === 'exec') && <NeedsAttentionQueue
+              items={recordAttention(requests, sponsors, sponsorLeads, teamMembers)}
+              user={user}
+              members={teamMembers}
+              onOpen={(item) => {
+                if (item.kind === 'part_request') {
+                  setSelectedRequestId(item.id)
+                  setModal('part-detail')
+                } else if (item.kind === 'sponsorship') {
+                  setSelectedSponsorId(item.id)
+                  setSponsorModal('sponsor-detail')
+                } else {
+                  setSelectedLeadId(item.id)
+                  setModal('lead-detail')
+                }
+              }}
+              onFollowUpChange={(item, date) => {
+                if (item.kind === 'part_request') void updateRequestFollowUp(item.id, date)
+                else if (item.kind === 'sponsorship') void updateSponsorFollowUp(item.id, date)
+                else void updateSponsorLeadFollowUp(item.id, date)
+              }}
+              onRequestStatusChange={(id, status) => void updateRequest(id, 'status', status)}
+              onLeadStatusChange={(id, status) => void updateSponsorLeadStatus(id, status)}
+              onAssigneeChange={(item, assigneeId) => {
+                if (item.kind === 'part_request') void updateRequestAssignee(item.id, assigneeId)
+                else if (item.kind === 'sponsor_lead') void updateSponsorLeadAssignee(item.id, assigneeId)
+              }}
+            />}
 
             <div className="overview-grid">
               <section className="section-block request-overview">
@@ -990,10 +1428,10 @@ function App() {
       {modal === 'request' && <RequestModal onClose={() => setModal(null)} onSave={addRequest} />}
       {sponsorModal === 'sponsor' && <SponsorModal onClose={() => setSponsorModal(null)} onSave={addSponsor} />}
       {sponsorModal === 'sponsor-edit' && selectedSponsor && <SponsorModal sponsor={selectedSponsor} onClose={() => setSponsorModal('sponsor-detail')} onSave={(input) => editSponsor(selectedSponsor.id, input)} />}
-      {sponsorModal === 'sponsor-detail' && selectedSponsor && <SponsorDetailsModal sponsor={selectedSponsor} canEdit={canEditSharedRecords} onClose={() => setSponsorModal(null)} onEdit={() => setSponsorModal('sponsor-edit')} onDelete={() => void deleteSponsor(selectedSponsor)} onDeliverableStatusChange={updateDeliverableStatus} />}
+      {sponsorModal === 'sponsor-detail' && selectedSponsor && <SponsorDetailsModal sponsor={selectedSponsor} canEdit={canEditSharedRecords} onClose={() => setSponsorModal(null)} onEdit={() => setSponsorModal('sponsor-edit')} onDelete={() => void deleteSponsor(selectedSponsor)} onDeliverableStatusChange={updateDeliverableStatus} onAddNote={(body) => addRecordNoteTo('sponsorship', selectedSponsor.id, body)} />}
       {modal === 'lead' && <SponsorLeadModal onClose={() => setModal(null)} onSave={addSponsorLead} />}
-      {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} canEdit={canEditSharedRecords} onClose={() => setModal(null)} onStatusChange={updateSponsorLeadStatus} />}
-      {modal === 'part-detail' && selectedRequest && <PartRequestDetailsModal request={selectedRequest} assignee={teamMembers.find((member) => member.id === selectedRequest.assigneeId)} onClose={() => setModal(null)} />}
+      {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} canEdit={canEditSharedRecords} onClose={() => setModal(null)} onStatusChange={updateSponsorLeadStatus} onAddNote={(body) => addRecordNoteTo('sponsor_lead', selectedSponsorLead.id, body)} />}
+      {modal === 'part-detail' && selectedRequest && <PartRequestDetailsModal request={selectedRequest} assignee={teamMembers.find((member) => member.id === selectedRequest.assigneeId)} canEdit={canEditSharedRecords} onClose={() => setModal(null)} onAddNote={(body) => addRecordNoteTo('part_request', selectedRequest.id, body)} />}
       {managementEdit?.kind === 'user' && <ManagementUserModal
         key={managementEdit.user.id}
         user={managementEdit.user}
@@ -1038,6 +1476,7 @@ function RequestModal({ request, onClose, onSave }: { request?: PartRequest; onC
     relationship: request?.relationship ?? '',
     communication: request?.communication ?? 'Not started' as CommunicationStatus,
     status: request?.status ?? 'Needed' as RequestStatus,
+    nextFollowUpAt: request?.nextFollowUpAt ?? '',
     recurring: request?.recurring ?? false,
     requestedBy: request?.requestedBy ?? '',
   })
@@ -1063,6 +1502,7 @@ function RequestModal({ request, onClose, onSave }: { request?: PartRequest; onC
         <label className="field"><span>Relationship to seller</span><input value={form.relationship} onChange={(event) => change('relationship', event.target.value)} placeholder="Who knows them, and how?" /></label>
         <label className="field"><span>Communication status</span><select value={form.communication} onChange={(event) => change('communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></label>
         {request && <label className="field"><span>Request status</span><select value={form.status} onChange={(event) => change('status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></label>}
+        <label className="field"><span>Next follow-up date</span><input type="date" value={form.nextFollowUpAt} onChange={(event) => change('nextFollowUpAt', event.target.value)} /></label>
       </div>
       <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary"><Plus size={16} /> {request ? 'Save changes' : 'Submit request'}</button></div>
     </form>
@@ -1101,7 +1541,7 @@ function SponsorModal({ sponsor, onClose, onSave }: { sponsor?: Sponsor; onClose
   </section></div>
 }
 
-function SponsorDetailsModal({ sponsor, canEdit, onClose, onEdit, onDelete, onDeliverableStatusChange }: { sponsor: Sponsor; canEdit: boolean; onClose: () => void; onEdit: () => void; onDelete: () => void; onDeliverableStatusChange: (sponsor: Sponsor, index: number, status: DeliverableStatus) => Promise<void> }) {
+function SponsorDetailsModal({ sponsor, canEdit, onClose, onEdit, onDelete, onDeliverableStatusChange, onAddNote }: { sponsor: Sponsor; canEdit: boolean; onClose: () => void; onEdit: () => void; onDelete: () => void; onDeliverableStatusChange: (sponsor: Sponsor, index: number, status: DeliverableStatus) => Promise<void>; onAddNote: (body: string) => Promise<void> }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="sponsor-details-title">
     <div className="modal-heading"><div><span className="section-kicker">FULL SPONSORSHIP RECORD</span><h2 id="sponsor-details-title">{sponsor.company}</h2><p>Added by {sponsor.createdBy} · {sponsor.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
     <div className="lead-details-content">
@@ -1110,6 +1550,7 @@ function SponsorDetailsModal({ sponsor, canEdit, onClose, onEdit, onDelete, onDe
       <section className="lead-details-section"><h3>Agreed deliverables ({sponsor.deliverables.length})</h3>{sponsor.deliverables.length ? <ul className="sponsor-deliverables-list">{sponsor.deliverables.map((deliverable, index) => <li key={`${deliverable.description}-${index}`}><span>{deliverable.description}</span><select className="inline-select deliverable-status-select" aria-label={`Tracking status for ${deliverable.description}`} value={deliverable.status} disabled={!canEdit} onChange={(event) => void onDeliverableStatusChange(sponsor, index, event.target.value as DeliverableStatus)}><option>Not started</option><option>In progress</option><option>Completed</option></select></li>)}</ul> : <p>No deliverables listed.</p>}</section>
       <section className="lead-details-section"><h3>Relationship</h3><p>{sponsor.relationship || 'No relationship details provided.'}</p></section>
       <section className="lead-details-section"><h3>Renewal / follow-up</h3><p>{sponsor.renewal || 'Not set'}</p></section>
+      <ActivityPanel activity={sponsor.activity} canEdit={canEdit} onAddNote={onAddNote} />
     </div>
     <div className="modal-actions sponsor-detail-actions">{canEdit && <button type="button" className="button secondary delete-sponsor-button" onClick={onDelete}><Trash2 size={15} /> Delete sponsorship</button>}<button type="button" className="button secondary" onClick={onClose}>Close</button>{canEdit && <button type="button" className="button primary" onClick={onEdit}>Edit sponsorship</button>}</div>
   </section></div>
@@ -1130,6 +1571,7 @@ function SponsorLeadModal({ lead, onClose, onSave }: { lead?: SponsorLead; onClo
     supportDetails: lead?.supportDetails ?? '',
     estimatedAmount: lead ? String(lead.estimatedAmount) : '',
     canIntroduce: lead?.canIntroduce ?? 'Not sure' as SponsorLeadInput['canIntroduce'],
+    nextFollowUpAt: lead?.nextFollowUpAt ?? '',
     status: lead?.status ?? 'New' as SponsorLeadStatus,
   })
   const [formError, setFormError] = useState('')
@@ -1153,6 +1595,7 @@ function SponsorLeadModal({ lead, onClose, onSave }: { lead?: SponsorLead; onClo
         <label className="field"><span>Contact phone</span><input type="tel" value={form.contactPhone} onChange={(event) => change('contactPhone', event.target.value)} placeholder="Optional" /></label>
         <label className="field"><span>Your subteam</span><select value={form.subteam} onChange={(event) => change('subteam', event.target.value)}><option value="">Select a subteam</option>{leadSubteams.map((option) => <option key={option}>{option}</option>)}</select></label>
         {lead && <label className="field"><span>Follow-up status</span><select value={form.status} onChange={(event) => change('status', event.target.value)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select></label>}
+        <label className="field"><span>Next follow-up date</span><input type="date" value={form.nextFollowUpAt} onChange={(event) => change('nextFollowUpAt', event.target.value)} /></label>
         <label className="field"><span>Estimated cash amount (USD)</span><input type="number" min="0" value={form.estimatedAmount} onChange={(event) => change('estimatedAmount', event.target.value)} placeholder="Optional; leave blank if unknown" /></label>
         <label className="field"><span>Can you introduce us?</span><select value={form.canIntroduce} onChange={(event) => change('canIntroduce', event.target.value as SponsorLeadInput['canIntroduce'])}><option>Not sure</option><option>Yes</option><option>No</option></select></label>
         <div className="field full-field"><span>What could they provide? <b>*</b></span><div className="support-options">{supportOptions.map((supportType) => <label className="support-option" key={supportType}><input type="checkbox" checked={form.supportTypes.includes(supportType)} onChange={() => toggleSupportType(supportType)} /><span>{supportType}</span></label>)}</div></div>
@@ -1166,7 +1609,7 @@ function SponsorLeadModal({ lead, onClose, onSave }: { lead?: SponsorLead; onClo
   </section></div>
 }
 
-function SponsorLeadDetailsModal({ lead, canEdit, onClose, onStatusChange }: { lead: SponsorLead; canEdit: boolean; onClose: () => void; onStatusChange: (id: string, status: SponsorLeadStatus) => Promise<void> }) {
+function SponsorLeadDetailsModal({ lead, canEdit, onClose, onStatusChange, onAddNote }: { lead: SponsorLead; canEdit: boolean; onClose: () => void; onStatusChange: (id: string, status: SponsorLeadStatus) => Promise<void>; onAddNote: (body: string) => Promise<void> }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="lead-details-title">
     <div className="modal-heading"><div><span className="section-kicker">SPONSOR LEAD · SUBMITTED BY {lead.createdBy.toUpperCase()}</span><h2 id="lead-details-title">{lead.company}</h2><p>{lead.subteam || 'Team connection'} · Submitted {lead.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close lead details"><X size={19} /></button></div>
     <div className="lead-details-content">
@@ -1174,13 +1617,15 @@ function SponsorLeadDetailsModal({ lead, canEdit, onClose, onStatusChange }: { l
       <section className="lead-details-section"><h3>Contact</h3><p>{lead.contactName || 'No named contact'}{lead.contactRole ? ` · ${lead.contactRole}` : ''}</p><div className="lead-contact-links">{lead.contactEmail && <a href={`mailto:${lead.contactEmail}`}>{lead.contactEmail}</a>}{lead.contactPhone && <a href={`tel:${lead.contactPhone}`}>{lead.contactPhone}</a>}</div></section>
       <section className="lead-details-section"><h3>Connection</h3><p>{lead.relationship}</p><div className="lead-detail-cash">Can introduce: <strong>{lead.canIntroduce}</strong></div></section>
       <section className="lead-details-section"><h3>Why they might support the team</h3><p>{lead.details}</p></section>
+      <section className="lead-details-section"><h3>Next follow-up</h3><p>{lead.nextFollowUpAt || 'Not scheduled'}</p></section>
       <label className="lead-detail-status"><span>Business team follow-up</span><select className="inline-select" value={lead.status} disabled={!canEdit} onChange={(event) => void onStatusChange(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select></label>
+      <ActivityPanel activity={lead.activity} canEdit={canEdit} onAddNote={onAddNote} />
     </div>
     <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Close</button></div>
   </section></div>
 }
 
-function PartRequestDetailsModal({ request, assignee, onClose }: { request: PartRequest; assignee?: TeamMember; onClose: () => void }) {
+function PartRequestDetailsModal({ request, assignee, canEdit, onClose, onAddNote }: { request: PartRequest; assignee?: TeamMember; canEdit: boolean; onClose: () => void; onAddNote: (body: string) => Promise<void> }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="part-details-title">
     <div className="modal-heading"><div><span className="section-kicker">PART REQUEST</span><h2 id="part-details-title">{request.item}</h2><p>Submitted by {request.createdBy} · {request.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close part request details"><X size={19} /></button></div>
     <div className="lead-details-content">
@@ -1190,6 +1635,8 @@ function PartRequestDetailsModal({ request, assignee, onClose }: { request: Part
       <section className="lead-details-section"><h3>Required specifications</h3><p>{request.specs || 'No required specifications provided.'}</p></section>
       <section className="lead-details-section"><h3>Compatibility</h3><p>{request.compatibility || 'No compatibility details provided.'}</p></section>
       <section className="lead-details-section"><h3>Assignment</h3><p>{assignee ? assignee.displayName : 'Unassigned'} · Request ID: {request.id}</p></section>
+      <section className="lead-details-section"><h3>Next follow-up</h3><p>{request.nextFollowUpAt || 'Not scheduled'}</p></section>
+      <ActivityPanel activity={request.activity} canEdit={canEdit} onAddNote={onAddNote} />
     </div>
     <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Close</button></div>
   </section></div>

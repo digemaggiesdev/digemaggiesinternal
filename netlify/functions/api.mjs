@@ -1,7 +1,7 @@
 import { getDatabase } from '@netlify/database'
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
-import { createPasswordResetUrl, sendPasswordResetEmail } from '../../server/email.js'
+import { createPasswordResetUrl, sendPasswordResetEmail, sendTaskAssignmentEmail } from '../../server/email.js'
 import {
   accountDeleteSchema,
   accountPatchSchema,
@@ -20,6 +20,7 @@ import {
   sponsorshipSchema,
   passwordResetRequestSchema,
   passwordResetSchema,
+  recordActivitySchema,
 } from '../../server/validation.js'
 
 const scrypt = promisify(scryptCallback)
@@ -67,7 +68,7 @@ function matchesSecret(value, secret) {
 }
 
 function publicUser(user) {
-  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '', tag: user.tag || 'member' }
+  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '', tag: user.tag || 'member', active: user.active !== false && user.active !== 0 }
 }
 
 function setSessionCookie(request, token, maxAge = sessionLifetime / 1000) {
@@ -117,20 +118,22 @@ async function findSession(database, request) {
 
   const tokenHash = sha256(token)
   const [row] = await database.sql`
-    SELECT users.id, users.email, users.display_name, users.subteam, users.tag
+    SELECT users.id, users.email, users.display_name, users.subteam, users.tag, users.active
     FROM sessions
     JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = ${tokenHash} AND sessions.expires_at > ${Date.now()}
+    WHERE sessions.token_hash = ${tokenHash} AND sessions.expires_at > ${Date.now()} AND users.active = TRUE
   `
   return row ? { user: publicUser(row), tokenHash } : null
 }
 
 async function listRecords(database, kind) {
   const rows = await database.sql`
-    SELECT data FROM records WHERE kind = ${kind} ORDER BY created_at DESC
+    SELECT data, updated_at FROM records WHERE kind = ${kind} ORDER BY created_at DESC
   `
   return rows.map((row) => {
     const record = row.data
+    record.updatedAt = row.updated_at
+    record.activity = Array.isArray(record.activity) ? record.activity : []
     if (kind === 'sponsorship') {
       record.deliverables = (record.deliverables || []).map((deliverable) => typeof deliverable === 'string'
         ? { description: deliverable, status: 'Not started' }
@@ -142,7 +145,13 @@ async function listRecords(database, kind) {
 
 async function createRecord(database, kind, data) {
   const now = new Date().toISOString()
-  const record = { ...data, id: randomUUID(), createdAt: now.slice(0, 10) }
+  const record = {
+    ...data,
+    id: randomUUID(),
+    createdAt: now.slice(0, 10),
+    updatedAt: now,
+    activity: [{ id: randomUUID(), type: 'update', actor: data.createdBy, body: 'Record created', createdAt: now }],
+  }
   await database.sql`
     INSERT INTO records (id, kind, data, created_at, updated_at)
     VALUES (${record.id}, ${kind}, ${JSON.stringify(record)}::jsonb, ${now}, ${now})
@@ -150,25 +159,43 @@ async function createRecord(database, kind, data) {
   return record
 }
 
-async function updateRecord(database, kind, id, changes) {
+function updateBody(changes) {
+  const labels = { assigneeId: 'assignee', communication: 'communication status', nextFollowUpAt: 'next follow-up date', status: 'status' }
+  return `Updated ${Object.keys(changes).map((field) => labels[field] || field.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`)).join(', ')}`
+}
+
+async function updateRecord(database, kind, id, changes, actor) {
   const [row] = await database.sql`SELECT data FROM records WHERE id = ${id} AND kind = ${kind}`
   if (!row) return null
-  const record = { ...row.data, ...changes }
+  const now = new Date().toISOString()
+  const record = {
+    ...row.data,
+    ...changes,
+    updatedAt: now,
+    activity: [...(Array.isArray(row.data.activity) ? row.data.activity : []), { id: randomUUID(), type: 'update', actor, body: updateBody(changes), createdAt: now }].slice(-100),
+  }
   await database.sql`
-    UPDATE records SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${new Date().toISOString()}
+    UPDATE records SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${now}
     WHERE id = ${id} AND kind = ${kind}
   `
   return record
 }
 
 async function listSponsorLeads(database) {
-  const rows = await database.sql`SELECT data FROM sponsor_leads ORDER BY created_at DESC`
-  return rows.map((row) => row.data)
+  const rows = await database.sql`SELECT data, updated_at FROM sponsor_leads ORDER BY created_at DESC`
+  return rows.map((row) => ({ ...row.data, updatedAt: row.updated_at, activity: Array.isArray(row.data.activity) ? row.data.activity : [] }))
 }
 
 async function createSponsorLead(database, data) {
   const now = new Date().toISOString()
-  const record = { ...data, id: randomUUID(), status: 'New', createdAt: now.slice(0, 10) }
+  const record = {
+    ...data,
+    id: randomUUID(),
+    status: 'New',
+    createdAt: now.slice(0, 10),
+    updatedAt: now,
+    activity: [{ id: randomUUID(), type: 'update', actor: data.createdBy, body: 'Record created', createdAt: now }],
+  }
   await database.sql`
     INSERT INTO sponsor_leads (id, data, created_at, updated_at)
     VALUES (${record.id}, ${JSON.stringify(record)}::jsonb, ${now}, ${now})
@@ -176,14 +203,40 @@ async function createSponsorLead(database, data) {
   return record
 }
 
-async function updateSponsorLead(database, id, changes) {
+async function updateSponsorLead(database, id, changes, actor) {
   const [row] = await database.sql`SELECT data FROM sponsor_leads WHERE id = ${id}`
   if (!row) return null
-  const record = { ...row.data, ...changes }
+  const now = new Date().toISOString()
+  const record = {
+    ...row.data,
+    ...changes,
+    updatedAt: now,
+    activity: [...(Array.isArray(row.data.activity) ? row.data.activity : []), { id: randomUUID(), type: 'update', actor, body: updateBody(changes), createdAt: now }].slice(-100),
+  }
   await database.sql`
-    UPDATE sponsor_leads SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${new Date().toISOString()}
+    UPDATE sponsor_leads SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${now}
     WHERE id = ${id}
   `
+  return record
+}
+
+async function addRecordActivity(database, kind, id, actor, body) {
+  const isLead = kind === 'sponsor_lead'
+  const [row] = isLead
+    ? await database.sql`SELECT data FROM sponsor_leads WHERE id = ${id}`
+    : await database.sql`SELECT data FROM records WHERE id = ${id} AND kind = ${kind}`
+  if (!row) return null
+  const now = new Date().toISOString()
+  const record = {
+    ...row.data,
+    updatedAt: now,
+    activity: [...(Array.isArray(row.data.activity) ? row.data.activity : []), { id: randomUUID(), type: 'note', actor, body, createdAt: now }].slice(-100),
+  }
+  if (isLead) {
+    await database.sql`UPDATE sponsor_leads SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${now} WHERE id = ${id}`
+  } else {
+    await database.sql`UPDATE records SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${now} WHERE id = ${id} AND kind = ${kind}`
+  }
   return record
 }
 
@@ -205,21 +258,21 @@ function canReviewSubteamChanges(user) {
 
 async function isEligibleAssignee(database, assigneeId, requesterSubteam) {
   if (!assigneeId) return true
-  const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId}`
+  const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId} AND active = TRUE`
   const allowedSubteams = new Set(['business', requesterSubteam.trim().toLowerCase()])
   return Boolean(member && allowedSubteams.has(member.subteam.trim().toLowerCase()))
 }
 
 async function isInSubteam(database, assigneeId, subteam) {
   if (!assigneeId) return true
-  const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId}`
+  const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId} AND active = TRUE`
   return Boolean(member && member.subteam.trim().toLowerCase() === subteam.trim().toLowerCase())
 }
 
 async function assigneeAuthorizationError(database, user, assigneeId, requesterSubteam, currentAssigneeId) {
   if (isDev(user)) {
     if (!assigneeId) return null
-    const [member] = await database.sql`SELECT id FROM users WHERE id = ${assigneeId}`
+    const [member] = await database.sql`SELECT id FROM users WHERE id = ${assigneeId} AND active = TRUE`
     return member ? null : { error: 'Choose an existing team member.', status: 400 }
   }
   if (canDelegate(user)) {
@@ -240,6 +293,27 @@ async function assigneeAuthorizationError(database, user, assigneeId, requesterS
   }
   if (!assigneeId && currentAssigneeId === user.id) return null
   return { error: 'Only Exec members can assign a task to another person.', status: 403 }
+}
+
+async function sendAssignmentNotification(database, environment, actor, assigneeId, previousAssigneeId, taskType, taskTitle, nextFollowUpAt) {
+  if (!assigneeId || assigneeId === previousAssigneeId || assigneeId === actor.id) return null
+  const [assignee] = await database.sql`SELECT email, display_name FROM users WHERE id = ${assigneeId} AND active = TRUE`
+  if (!assignee) return jsonError('Choose an active team member to assign this task.', 400)
+  try {
+    await sendTaskAssignmentEmail({
+      email: assignee.email,
+      displayName: assignee.display_name,
+      assignedBy: actor.displayName,
+      taskType,
+      taskTitle,
+      nextFollowUpAt,
+      environment,
+    })
+    return null
+  } catch (error) {
+    console.error('Could not send task assignment email:', error)
+    return jsonError('Could not send the assignment email. The task was not changed; check email settings and try again.', 502)
+  }
 }
 
 function getRouteId(path, prefix) {
@@ -295,7 +369,7 @@ export function createApiHandler(database, environment = process.env) {
           try {
             await client.query('BEGIN')
             const result = await client.query(
-              'INSERT INTO users (id, email, display_name, subteam, tag, password_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email, display_name, subteam, tag',
+              'INSERT INTO users (id, email, display_name, subteam, tag, password_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email, display_name, subteam, tag, active',
               [id, input.email, input.displayName, input.subteam, tag, hash, createdAt],
             )
             await client.query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [sha256(token), id, expiresAt])
@@ -314,7 +388,7 @@ export function createApiHandler(database, environment = process.env) {
         }
 
         const input = parsed.data
-        const [user] = await database.sql`SELECT * FROM users WHERE email = ${input.email}`
+        const [user] = await database.sql`SELECT * FROM users WHERE email = ${input.email} AND active = TRUE`
         if (!user || !(await passwordMatches(input.password, user.password_hash))) {
           return jsonError('Email or password is incorrect.', 401)
         }
@@ -411,8 +485,8 @@ export function createApiHandler(database, environment = process.env) {
 
       if (pathname === '/api/management/users' && method === 'GET') {
         const users = await database.sql`
-          SELECT id, email, display_name AS "displayName", subteam, tag
-          FROM users ORDER BY display_name
+          SELECT id, email, display_name AS "displayName", subteam, tag, active
+          FROM users ORDER BY active DESC, display_name
         `
         return Response.json({ users })
       }
@@ -491,14 +565,20 @@ export function createApiHandler(database, environment = process.env) {
       if (managedUserId && method === 'PATCH') {
         const parsed = await parseBody(request, managementUserPatchSchema)
         if (parsed.response) return parsed.response
+        if (parsed.data.active === false && managedUserId === session.user.id) return jsonError('You cannot deactivate your own account.', 400)
         try {
           const [updated] = await database.sql`
             UPDATE users
             SET display_name = ${parsed.data.displayName}, email = ${parsed.data.email},
-              subteam = ${parsed.data.subteam}, tag = COALESCE(${parsed.data.tag ?? null}, tag)
+              subteam = ${parsed.data.subteam}, tag = COALESCE(${parsed.data.tag ?? null}, tag),
+              active = COALESCE(${parsed.data.active ?? null}, active)
             WHERE id = ${managedUserId}
-            RETURNING id, email, display_name, subteam, tag
+            RETURNING id, email, display_name, subteam, tag, active
           `
+          if (updated && parsed.data.active === false) {
+            await database.sql`DELETE FROM sessions WHERE user_id = ${managedUserId}`
+            await database.sql`DELETE FROM password_reset_tokens WHERE user_id = ${managedUserId}`
+          }
           return updated ? Response.json({ user: publicUser(updated) }) : jsonError('Team member not found.', 404)
         } catch (error) {
           if (error.code === '23505' || error.cause?.code === '23505') {
@@ -521,8 +601,14 @@ export function createApiHandler(database, environment = process.env) {
             existing.data.assigneeId,
           )
           if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+          const emailResponse = await sendAssignmentNotification(
+            database, environment, session.user, parsed.data.assigneeId, existing.data.assigneeId,
+            'Part request', parsed.data.item || existing.data.item,
+            parsed.data.nextFollowUpAt ?? existing.data.nextFollowUpAt,
+          )
+          if (emailResponse) return emailResponse
         }
-        const record = await updateRecord(database, 'part_request', managedRequestId, parsed.data)
+        const record = await updateRecord(database, 'part_request', managedRequestId, parsed.data, session.user.displayName)
         return record ? Response.json({ record }) : jsonError('Part request not found.', 404)
       }
 
@@ -530,7 +616,7 @@ export function createApiHandler(database, environment = process.env) {
       if (managedSponsorshipId && method === 'PATCH') {
         const parsed = await parseBody(request, sponsorshipPatchSchema)
         if (parsed.response) return parsed.response
-        const record = await updateRecord(database, 'sponsorship', managedSponsorshipId, parsed.data)
+        const record = await updateRecord(database, 'sponsorship', managedSponsorshipId, parsed.data, session.user.displayName)
         return record ? Response.json({ record }) : jsonError('Sponsorship not found.', 404)
       }
 
@@ -547,8 +633,14 @@ export function createApiHandler(database, environment = process.env) {
             existing.data.assigneeId,
           )
           if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+          const emailResponse = await sendAssignmentNotification(
+            database, environment, session.user, parsed.data.assigneeId, existing.data.assigneeId,
+            'Sponsor lead', parsed.data.company || existing.data.company,
+            parsed.data.nextFollowUpAt ?? existing.data.nextFollowUpAt,
+          )
+          if (emailResponse) return emailResponse
         }
-        const record = await updateSponsorLead(database, managedSponsorLeadId, parsed.data)
+        const record = await updateSponsorLead(database, managedSponsorLeadId, parsed.data, session.user.displayName)
         return record ? Response.json({ record }) : jsonError('Sponsor lead not found.', 404)
       }
 
@@ -718,11 +810,12 @@ export function createApiHandler(database, environment = process.env) {
       }
 
       if (method === 'GET' && pathname === '/api/team-members') {
-        const members = await database.sql`SELECT id, display_name, subteam FROM users ORDER BY display_name`
+        const members = await database.sql`SELECT id, display_name, subteam, active FROM users ORDER BY display_name`
         return Response.json({ members: members.map((member) => ({
           id: member.id,
           displayName: member.display_name,
           subteam: member.subteam || '',
+          active: member.active,
         })) })
       }
 
@@ -741,18 +834,37 @@ export function createApiHandler(database, environment = process.env) {
       }
 
       const requestId = getRouteId(pathname, '/api/requests/')
+      const requestActivityId = pathname.endsWith('/activity')
+        ? getRouteId(pathname.slice(0, -'/activity'.length), '/api/requests/')
+        : null
+      if (requestActivityId && method === 'POST') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to add record notes.', 403)
+        const parsed = await parseBody(request, recordActivitySchema)
+        if (parsed.response) return parsed.response
+        const record = await addRecordActivity(database, 'part_request', requestActivityId, session.user.displayName, parsed.data.body)
+        return record ? Response.json({ record }, { status: 201 }) : jsonError('Part request not found.', 404)
+      }
       if (requestId && method === 'PATCH') {
-        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to edit shared records.', 403)
         const parsed = await parseBody(request, partRequestPatchSchema)
         if (parsed.response) return parsed.response
+        const followUpOnly = Object.keys(parsed.data).every((field) => field === 'nextFollowUpAt')
+        if (!canEditSharedRecords(session.user) && !(canDelegate(session.user) && followUpOnly)) {
+          return jsonError('STL or Dev access is required to edit shared records. Exec may update follow-up dates.', 403)
+        }
         if (Object.hasOwn(parsed.data, 'assigneeId')) {
           const [existing] = await database.sql`SELECT data FROM records WHERE id = ${requestId} AND kind = 'part_request'`
           if (!existing) return jsonError('Part request not found.', 404)
           const sourceSubteam = existing.data.requesterSubteam || existing.data.subteam || ''
           const assignmentError = await assigneeAuthorizationError(database, session.user, parsed.data.assigneeId, sourceSubteam, existing.data.assigneeId)
           if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+          const emailResponse = await sendAssignmentNotification(
+            database, environment, session.user, parsed.data.assigneeId, existing.data.assigneeId,
+            'Part request', parsed.data.item || existing.data.item,
+            parsed.data.nextFollowUpAt ?? existing.data.nextFollowUpAt,
+          )
+          if (emailResponse) return emailResponse
         }
-        const record = await updateRecord(database, 'part_request', requestId, parsed.data)
+        const record = await updateRecord(database, 'part_request', requestId, parsed.data, session.user.displayName)
         return record ? Response.json({ record }) : jsonError('Part request not found.', 404)
       }
       if (requestId && method === 'DELETE') {
@@ -772,11 +884,24 @@ export function createApiHandler(database, environment = process.env) {
       }
 
       const sponsorshipId = getRouteId(pathname, '/api/sponsorships/')
+      const sponsorshipActivityId = pathname.endsWith('/activity')
+        ? getRouteId(pathname.slice(0, -'/activity'.length), '/api/sponsorships/')
+        : null
+      if (sponsorshipActivityId && method === 'POST') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to add record notes.', 403)
+        const parsed = await parseBody(request, recordActivitySchema)
+        if (parsed.response) return parsed.response
+        const record = await addRecordActivity(database, 'sponsorship', sponsorshipActivityId, session.user.displayName, parsed.data.body)
+        return record ? Response.json({ record }, { status: 201 }) : jsonError('Sponsorship not found.', 404)
+      }
       if (sponsorshipId && method === 'PATCH') {
-        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to edit shared records.', 403)
         const parsed = await parseBody(request, sponsorshipPatchSchema)
         if (parsed.response) return parsed.response
-        const record = await updateRecord(database, 'sponsorship', sponsorshipId, parsed.data)
+        const followUpOnly = Object.keys(parsed.data).every((field) => field === 'renewal')
+        if (!canEditSharedRecords(session.user) && !(canDelegate(session.user) && followUpOnly)) {
+          return jsonError('STL or Dev access is required to edit shared records. Exec may update renewal / follow-up dates.', 403)
+        }
+        const record = await updateRecord(database, 'sponsorship', sponsorshipId, parsed.data, session.user.displayName)
         return record ? Response.json({ record }) : jsonError('Sponsorship not found.', 404)
       }
       if (sponsorshipId && method === 'DELETE') {
@@ -800,18 +925,37 @@ export function createApiHandler(database, environment = process.env) {
       }
 
       const sponsorLeadId = getRouteId(pathname, '/api/sponsor-leads/')
+      const sponsorLeadActivityId = pathname.endsWith('/activity')
+        ? getRouteId(pathname.slice(0, -'/activity'.length), '/api/sponsor-leads/')
+        : null
+      if (sponsorLeadActivityId && method === 'POST') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to add record notes.', 403)
+        const parsed = await parseBody(request, recordActivitySchema)
+        if (parsed.response) return parsed.response
+        const record = await addRecordActivity(database, 'sponsor_lead', sponsorLeadActivityId, session.user.displayName, parsed.data.body)
+        return record ? Response.json({ record }, { status: 201 }) : jsonError('Sponsor lead not found.', 404)
+      }
       if (sponsorLeadId && method === 'PATCH') {
-        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to edit shared records.', 403)
         const parsed = await parseBody(request, sponsorLeadPatchSchema)
         if (parsed.response) return parsed.response
+        const followUpOnly = Object.keys(parsed.data).every((field) => field === 'nextFollowUpAt')
+        if (!canEditSharedRecords(session.user) && !(canDelegate(session.user) && followUpOnly)) {
+          return jsonError('STL or Dev access is required to edit shared records. Exec may update follow-up dates.', 403)
+        }
         if (Object.hasOwn(parsed.data, 'assigneeId')) {
           const [existing] = await database.sql`SELECT data FROM sponsor_leads WHERE id = ${sponsorLeadId}`
           if (!existing) return jsonError('Sponsor lead not found.', 404)
           const sourceSubteam = existing.data.requesterSubteam || existing.data.subteam || ''
           const assignmentError = await assigneeAuthorizationError(database, session.user, parsed.data.assigneeId, sourceSubteam, existing.data.assigneeId)
           if (assignmentError) return jsonError(assignmentError.error, assignmentError.status)
+          const emailResponse = await sendAssignmentNotification(
+            database, environment, session.user, parsed.data.assigneeId, existing.data.assigneeId,
+            'Sponsor lead', parsed.data.company || existing.data.company,
+            parsed.data.nextFollowUpAt ?? existing.data.nextFollowUpAt,
+          )
+          if (emailResponse) return emailResponse
         }
-        const record = await updateSponsorLead(database, sponsorLeadId, parsed.data)
+        const record = await updateSponsorLead(database, sponsorLeadId, parsed.data, session.user.displayName)
         return record ? Response.json({ record }) : jsonError('Sponsor lead not found.', 404)
       }
       if (sponsorLeadId && method === 'DELETE') {

@@ -22,12 +22,14 @@ export type TeamUser = {
   displayName: string
   subteam: string
   tag: 'member' | 'dev' | 'stl'
+  active: boolean
 }
 
 export type TeamMember = {
   id: string
   displayName: string
   subteam: string
+  active: boolean
 }
 
 export type SubteamChangeRequest = {
@@ -61,11 +63,22 @@ export type PartRequest = {
   requestedBy: string
   requesterSubteam?: string
   assigneeId?: string
+  nextFollowUpAt?: string
+  updatedAt?: string
+  activity?: RecordActivity[]
   createdAt: string
   createdBy: string
 }
 
-export type PartRequestInput = Omit<PartRequest, 'id' | 'createdAt' | 'createdBy' | 'requesterSubteam' | 'assigneeId'>
+export type PartRequestInput = Omit<PartRequest, 'id' | 'createdAt' | 'createdBy' | 'requesterSubteam' | 'assigneeId' | 'updatedAt' | 'activity'>
+
+export type RecordActivity = {
+  id: string
+  type: 'update' | 'note'
+  actor: string
+  body: string
+  createdAt: string
+}
 
 export type Sponsor = {
   id: string
@@ -76,11 +89,13 @@ export type Sponsor = {
   deliverables: { description: string; status: DeliverableStatus }[]
   relationship: string
   renewal: string
+  updatedAt?: string
+  activity?: RecordActivity[]
   createdAt: string
   createdBy: string
 }
 
-export type SponsorInput = Omit<Sponsor, 'id' | 'createdAt' | 'createdBy'>
+export type SponsorInput = Omit<Sponsor, 'id' | 'createdAt' | 'createdBy' | 'updatedAt' | 'activity'>
 
 export type SponsorLead = {
   id: string
@@ -98,12 +113,15 @@ export type SponsorLead = {
   canIntroduce: 'Yes' | 'No' | 'Not sure'
   requesterSubteam?: string
   assigneeId?: string
+  nextFollowUpAt?: string
+  updatedAt?: string
+  activity?: RecordActivity[]
   status: SponsorLeadStatus
   createdAt: string
   createdBy: string
 }
 
-export type SponsorLeadInput = Omit<SponsorLead, 'id' | 'status' | 'createdAt' | 'createdBy' | 'requesterSubteam' | 'assigneeId'>
+export type SponsorLeadInput = Omit<SponsorLead, 'id' | 'status' | 'createdAt' | 'createdBy' | 'requesterSubteam' | 'assigneeId' | 'updatedAt' | 'activity'>
 
 export class ApiError extends Error {
   status: number
@@ -171,16 +189,12 @@ export async function getManagementUsers() {
   return result.users
 }
 
-export async function updateManagementUser(id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl' }) {
+export async function updateManagementUser(id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl'; active?: boolean }) {
   const result = await request<{ user: TeamUser }>(`/api/management/users/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(changes),
   })
   return result.user
-}
-
-export async function deleteManagementUser(id: string) {
-  await request<void>(`/api/management/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export async function emailManagementUserPasswordReset(id: string) {
@@ -203,7 +217,7 @@ export async function requestPasswordReset(email: string) {
   })
 }
 
-export async function updateManagementRequest(id: string, changes: Partial<PartRequestInput>) {
+export async function updateManagementRequest(id: string, changes: Partial<PartRequestInput & Pick<PartRequest, 'assigneeId'>>) {
   const result = await request<{ record: PartRequest }>(`/api/management/requests/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(changes),
@@ -332,6 +346,24 @@ export async function updateSponsorLead(id: string, changes: Partial<SponsorLead
   const result = await request<{ record: SponsorLead }>(`/api/sponsor-leads/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(changes),
+  })
+  return result.record
+}
+
+export function addRecordNote(kind: 'part_request', id: string, body: string): Promise<PartRequest>
+export function addRecordNote(kind: 'sponsor_lead', id: string, body: string): Promise<SponsorLead>
+export async function addRecordNote(kind: 'part_request' | 'sponsor_lead', id: string, body: string): Promise<PartRequest | SponsorLead> {
+  const result = await request<{ record: PartRequest | SponsorLead }>(`/api/${kind === 'part_request' ? 'requests' : 'sponsor-leads'}/${encodeURIComponent(id)}/activity`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  })
+  return result.record
+}
+
+export async function addSponsorNote(id: string, body: string) {
+  const result = await request<{ record: Sponsor }>(`/api/sponsorships/${encodeURIComponent(id)}/activity`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
   })
   return result.record
 }

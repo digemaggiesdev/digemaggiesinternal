@@ -194,7 +194,7 @@ test('invite auth and shared records persist through the API', async () => {
     item: 'Test hydraulic fitting', company: 'Test Supplier', link: '', contact: '', quantity: 2,
     value: 45, specs: '1/4 inch NPT', compatibility: 'Fits test manifold', priority: 'High',
     subteam: 'Hydraulics', relationship: 'Member introduction', communication: 'Contacted',
-    status: 'Needed', recurring: false, requestedBy: 'Test Member',
+    status: 'Needed', nextFollowUpAt: '2026-10-29', recurring: false, requestedBy: 'Test Member',
   }
   const createdPartResponse = await fetch(`${baseUrl}/api/requests`, {
     method: 'POST',
@@ -205,12 +205,28 @@ test('invite auth and shared records persist through the API', async () => {
   const { record: part } = await createdPartResponse.json()
   assert.equal(part.createdBy, account.displayName)
   assert.equal(part.requesterSubteam, account.subteam)
+  assert.equal(part.nextFollowUpAt, partInput.nextFollowUpAt)
+  assert.equal(part.activity[0].body, 'Record created')
+  const noteDenied = await fetch(`${baseUrl}/api/requests/${part.id}/activity`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ body: 'Internal note' }),
+  })
+  assert.equal(noteDenied.status, 403)
+  const partNote = await fetch(`${baseUrl}/api/requests/${part.id}/activity`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ body: 'Confirm dimensions with the supplier.' }),
+  })
+  assert.equal((await partNote.json()).record.activity.at(-1).body, 'Confirm dimensions with the supplier.')
+  const emailsBeforeSelfAssignment = sentEmails.length
   const devSelfAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: devCookie },
     body: JSON.stringify({ assigneeId: devUser.id }),
   })
   assert.equal((await devSelfAssignment.json()).record.assigneeId, devUser.id)
+  assert.equal(sentEmails.length, emailsBeforeSelfAssignment)
 
   const businessAccount = {
     ...account,
@@ -304,6 +320,23 @@ test('invite auth and shared records persist through the API', async () => {
   const provisioningDb = new Database(databasePath)
   provisioningDb.prepare('UPDATE users SET subteam = ? WHERE id = ?').run('Exec', execUser.id)
   provisioningDb.close()
+  const execSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: execCookie } })
+  assert.equal((await execSession.json()).user.subteam, 'Exec')
+  const execFollowUpUpdate = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ nextFollowUpAt: '2026-10-30' }),
+  })
+  assert.equal(execFollowUpUpdate.status, 200, await execFollowUpUpdate.clone().text())
+  const execUpdatedPart = (await execFollowUpUpdate.json()).record
+  assert.equal(execUpdatedPart.nextFollowUpAt, '2026-10-30')
+  assert.equal(execUpdatedPart.item, partInput.item)
+  const execCannotChangeStatus = await fetch(`${baseUrl}/api/requests/${part.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ status: 'Outreach' }),
+  })
+  assert.equal(execCannotChangeStatus.status, 403)
   const execAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: execCookie },
@@ -322,12 +355,17 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ assigneeId: 'missing-target' }),
   })
   assert.equal(invalidTargetAssignment.status, 403)
+  const emailsBeforeRequestAssignment = sentEmails.length
   const stlAssignment = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: stlCookie },
     body: JSON.stringify({ assigneeId: accountUser.id }),
   })
   assert.equal((await stlAssignment.json()).record.assigneeId, accountUser.id)
+  assert.equal(sentEmails.length, emailsBeforeRequestAssignment + 1)
+  assert.deepEqual(sentEmails.at(-1).to, [account.email])
+  assert.match(sentEmails.at(-1).subject, /Test hydraulic fitting/)
+  assert.match(sentEmails.at(-1).text, /Next follow-up date: 2026-10-30/)
   const stlCannotAssignOutsideSubteam = await fetch(`${baseUrl}/api/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: stlCookie },
@@ -396,6 +434,9 @@ test('invite auth and shared records persist through the API', async () => {
     { description: 'Logo placement', status: 'Completed' },
     { description: 'Demo invitation', status: 'In progress' },
   ])
+  const execPermissionsDb = new Database(databasePath)
+  execPermissionsDb.prepare('UPDATE users SET tag = ? WHERE id = ?').run('member', execUser.id)
+  execPermissionsDb.close()
   const listedSponsors = await fetch(`${baseUrl}/api/sponsorships`, { headers: { Cookie: cookie } })
   assert.equal((await listedSponsors.json()).records[0].company, 'Edited Test Sponsor')
   const managedSponsor = await fetch(`${baseUrl}/api/management/sponsorships/${sponsor.id}`, {
@@ -405,6 +446,24 @@ test('invite auth and shared records persist through the API', async () => {
   })
   assert.equal(managedSponsor.status, 200, await managedSponsor.clone().text())
   assert.equal((await managedSponsor.json()).record.contact, 'Dev edited sponsor contact')
+  const execSponsorFollowUp = await fetch(`${baseUrl}/api/sponsorships/${sponsor.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ renewal: '2027-01-15' }),
+  })
+  assert.equal(execSponsorFollowUp.status, 200, await execSponsorFollowUp.clone().text())
+  const execUpdatedSponsor = (await execSponsorFollowUp.json()).record
+  assert.equal(execUpdatedSponsor.renewal, '2027-01-15')
+  assert.equal(execUpdatedSponsor.company, 'Edited Test Sponsor')
+  const execCannotEditSponsorAmount = await fetch(`${baseUrl}/api/sponsorships/${sponsor.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ amount: 1000 }),
+  })
+  assert.equal(execCannotEditSponsorAmount.status, 403)
+  const execStlPermissionsDb = new Database(databasePath)
+  execStlPermissionsDb.prepare('UPDATE users SET tag = ? WHERE id = ?').run('stl', execUser.id)
+  execStlPermissionsDb.close()
 
   const teammateRegistration = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
@@ -429,7 +488,7 @@ test('invite auth and shared records persist through the API', async () => {
     contactEmail: 'jordan@example.com', contactPhone: '', subteam: 'Outreach',
     relationship: 'A teammate can introduce us', details: 'Interested in supporting student engineering.',
     supportTypes: ['Parts / materials', 'Equipment'], supportDetails: 'May donate steel stock or loan a portable welder.',
-    estimatedAmount: 0, canIntroduce: 'Yes',
+    estimatedAmount: 0, canIntroduce: 'Yes', nextFollowUpAt: '2026-10-30',
   }
   const createdLeadResponse = await fetch(`${baseUrl}/api/sponsor-leads`, {
     method: 'POST',
@@ -441,6 +500,13 @@ test('invite auth and shared records persist through the API', async () => {
   assert.equal(lead.createdBy, account.displayName)
   assert.equal(lead.requesterSubteam, account.subteam)
   assert.equal(lead.status, 'New')
+  assert.equal(lead.nextFollowUpAt, sponsorLeadInput.nextFollowUpAt)
+  const leadNote = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}/activity`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ body: 'Ask for an introduction next week.' }),
+  })
+  assert.equal((await leadNote.json()).record.activity.at(-1).type, 'note')
   assert.deepEqual(lead.supportTypes, sponsorLeadInput.supportTypes)
   const memberLeadEdit = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
     method: 'PATCH',
@@ -460,12 +526,17 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ assigneeId: businessUser.id }),
   })
   assert.equal(nonExecLeadAssignment.status, 403)
+  const emailsBeforeLeadAssignment = sentEmails.length
   const stlLeadAssignment = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: stlCookie },
     body: JSON.stringify({ assigneeId: accountUser.id }),
   })
   assert.equal((await stlLeadAssignment.json()).record.assigneeId, accountUser.id)
+  assert.equal(sentEmails.length, emailsBeforeLeadAssignment + 1)
+  assert.deepEqual(sentEmails.at(-1).to, [account.email])
+  assert.match(sentEmails.at(-1).subject, /Test Potential Sponsor/)
+  assert.match(sentEmails.at(-1).text, /Next follow-up date: 2026-10-30/)
   const stlLeadCannotAssignOutsideSubteam = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: stlCookie },
@@ -490,6 +561,15 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ assigneeId: accountUser.id }),
   })
   assert.equal((await execAssignsLead.json()).record.assigneeId, accountUser.id)
+  const execLeadFollowUpUpdate = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: execCookie },
+    body: JSON.stringify({ nextFollowUpAt: '2026-10-31' }),
+  })
+  assert.equal(execLeadFollowUpUpdate.status, 200, await execLeadFollowUpUpdate.clone().text())
+  const execUpdatedLead = (await execLeadFollowUpUpdate.json()).record
+  assert.equal(execUpdatedLead.nextFollowUpAt, '2026-10-31')
+  assert.equal(execUpdatedLead.details, sponsorLeadInput.details)
   const leadStatusResponse = await fetch(`${baseUrl}/api/sponsor-leads/${lead.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: stlCookie },
@@ -605,18 +685,34 @@ test('invite auth and shared records persist through the API', async () => {
     body: JSON.stringify({ displayName: businessAccount.displayName, email: businessAccount.email, subteam: 'Exec', tag: 'admin' }),
   })
   assert.equal(invalidAccessTag.status, 400)
+  const emailsBeforeManagedRequestAssignment = sentEmails.length
   const managedPart = await fetch(`${baseUrl}/api/management/requests/${part.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: devCookie },
-    body: JSON.stringify({ item: 'Dev edited hydraulic fitting', priority: 'Urgent' }),
+    body: JSON.stringify({ item: 'Dev edited hydraulic fitting', priority: 'Urgent', assigneeId: stlUser.id }),
   })
+  assert.equal(managedPart.status, 200, await managedPart.clone().text())
   assert.equal((await managedPart.json()).record.item, 'Dev edited hydraulic fitting')
+  assert.equal(sentEmails.length, emailsBeforeManagedRequestAssignment + 1)
+  assert.deepEqual(sentEmails.at(-1).to, [stlUser.email])
+  assert.match(sentEmails.at(-1).subject, /Dev edited hydraulic fitting/)
+  const emailsBeforeManagedLeadAssignment = sentEmails.length
   const managedLead = await fetch(`${baseUrl}/api/management/sponsor-leads/${lead.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: devCookie },
-    body: JSON.stringify({ details: 'Dev edited sponsor lead details', status: 'Following up' }),
+    body: JSON.stringify({ details: 'Dev edited sponsor lead details', status: 'Following up', assigneeId: stlUser.id }),
   })
+  assert.equal(managedLead.status, 200, await managedLead.clone().text())
   assert.equal((await managedLead.json()).record.details, 'Dev edited sponsor lead details')
+  assert.equal(sentEmails.length, emailsBeforeManagedLeadAssignment + 1)
+  assert.deepEqual(sentEmails.at(-1).to, [stlUser.email])
+  assert.match(sentEmails.at(-1).subject, /Test Potential Sponsor/)
+  const managedLeadReassignment = await fetch(`${baseUrl}/api/management/sponsor-leads/${lead.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ assigneeId: accountUser.id }),
+  })
+  assert.equal(managedLeadReassignment.status, 200, await managedLeadReassignment.clone().text())
   const devAccountUpdate = await fetch(`${baseUrl}/api/account`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: devCookie },
@@ -658,6 +754,7 @@ test('invite auth and shared records persist through the API', async () => {
     displayName: 'Updated Test Member',
     subteam: 'Software',
     tag: 'member',
+    active: true,
   })
   const updatedSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: cookie } })
   assert.equal((await updatedSession.json()).user.displayName, 'Updated Test Member')
@@ -766,4 +863,36 @@ test('invite auth and shared records persist through the API', async () => {
   assert.deepEqual(await unknownAccountReset.json(), await knownAccountReset.json())
   assert.equal(sentEmails.length, sentEmailCount + 1)
   assert.deepEqual(sentEmails.at(-1).to, [stlUser.email])
+  const activeStlLogin = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: stlUser.email, password: 'a-new-temporary-password' }),
+  })
+  const activeStlCookie = activeStlLogin.headers.get('set-cookie')?.split(';')[0]
+  assert.ok(activeStlCookie)
+  const deactivateStl = await fetch(`${baseUrl}/api/management/users/${stlUser.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ displayName: stlUser.displayName, email: stlUser.email, subteam: stlUser.subteam, active: false }),
+  })
+  assert.equal((await deactivateStl.json()).user.active, false)
+  const managedMembersAfterDeactivation = await fetch(`${baseUrl}/api/team-members`, { headers: { Cookie: devCookie } })
+  assert.equal((await managedMembersAfterDeactivation.json()).members.find((member) => member.id === stlUser.id).active, false)
+  assert.equal((await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: activeStlCookie } })).status, 401)
+  assert.equal((await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: stlUser.email, password: 'a-new-temporary-password' }),
+  })).status, 401)
+  const reactivateStl = await fetch(`${baseUrl}/api/management/users/${stlUser.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: devCookie },
+    body: JSON.stringify({ displayName: stlUser.displayName, email: stlUser.email, subteam: stlUser.subteam, active: true }),
+  })
+  assert.equal((await reactivateStl.json()).user.active, true)
+  assert.equal((await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: stlUser.email, password: 'a-new-temporary-password' }),
+  })).status, 200)
 })

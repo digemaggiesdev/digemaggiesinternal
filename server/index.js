@@ -5,7 +5,7 @@ import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSa
 import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 import { db } from './db.js'
-import { createPasswordResetUrl, sendPasswordResetEmail } from './email.js'
+import { createPasswordResetUrl, sendPasswordResetEmail, sendTaskAssignmentEmail } from './email.js'
 import {
   accountDeleteSchema,
   accountPatchSchema,
@@ -24,6 +24,7 @@ import {
   sponsorshipSchema,
   passwordResetRequestSchema,
   passwordResetSchema,
+  recordActivitySchema,
 } from './validation.js'
 
 const scrypt = promisify(scryptCallback)
@@ -60,7 +61,7 @@ const passwordResetLimiter = rateLimit({
 })
 
 function publicUser(user) {
-  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '', tag: user.tag || 'member' }
+  return { id: user.id, email: user.email, displayName: user.display_name, subteam: user.subteam || '', tag: user.tag || 'member', active: user.active !== 0 && user.active !== false }
 }
 
 function getCookie(req, name) {
@@ -106,9 +107,9 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Sign in to continue.' })
 
   const session = db.prepare(`
-    SELECT users.id, users.email, users.display_name, users.subteam, users.tag
+    SELECT users.id, users.email, users.display_name, users.subteam, users.tag, users.active
     FROM sessions JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = ? AND sessions.expires_at > ?
+    WHERE sessions.token_hash = ? AND sessions.expires_at > ? AND users.active = 1
   `).get(tokenHash(token), Date.now())
 
   if (!session) return res.status(401).json({ error: 'Your session expired. Sign in again.' })
@@ -133,15 +134,23 @@ function parseBody(schema, req, res) {
 
 function createRecord(kind, data) {
   const now = new Date().toISOString()
-  const record = { ...data, id: randomUUID(), createdAt: now.slice(0, 10) }
+  const record = {
+    ...data,
+    id: randomUUID(),
+    createdAt: now.slice(0, 10),
+    updatedAt: now,
+    activity: [{ id: randomUUID(), type: 'update', actor: data.createdBy, body: 'Record created', createdAt: now }],
+  }
   db.prepare('INSERT INTO records (id, kind, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
     .run(record.id, kind, JSON.stringify(record), now, now)
   return record
 }
 
 function listRecords(kind) {
-  return db.prepare('SELECT data FROM records WHERE kind = ? ORDER BY created_at DESC').all(kind).map((row) => {
+  return db.prepare('SELECT data, updated_at FROM records WHERE kind = ? ORDER BY created_at DESC').all(kind).map((row) => {
     const record = JSON.parse(row.data)
+    record.updatedAt = row.updated_at
+    record.activity = Array.isArray(record.activity) ? record.activity : []
     if (kind === 'sponsorship') {
       record.deliverables = (record.deliverables || []).map((deliverable) => typeof deliverable === 'string'
         ? { description: deliverable, status: 'Not started' }
@@ -151,33 +160,95 @@ function listRecords(kind) {
   })
 }
 
-function updateRecord(kind, id, changes) {
+function activityEntry(actor, body, type = 'update', createdAt = new Date().toISOString()) {
+  return { id: randomUUID(), type, actor, body, createdAt }
+}
+
+function updateBody(changes) {
+  const labels = {
+    assigneeId: 'assignee',
+    communication: 'communication status',
+    nextFollowUpAt: 'next follow-up date',
+    status: 'status',
+  }
+  const changedFields = Object.keys(changes).map((field) => labels[field] || field.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`))
+  return `Updated ${changedFields.join(', ')}`
+}
+
+function updateRecord(kind, id, changes, actor) {
   const row = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(id, kind)
   if (!row) return null
-  const record = { ...JSON.parse(row.data), ...changes }
+  const previous = JSON.parse(row.data)
+  const now = new Date().toISOString()
+  const record = {
+    ...previous,
+    ...changes,
+    updatedAt: now,
+    activity: [...(Array.isArray(previous.activity) ? previous.activity : []), activityEntry(actor, updateBody(changes), 'update', now)].slice(-100),
+  }
   db.prepare('UPDATE records SET data = ?, updated_at = ? WHERE id = ? AND kind = ?')
-    .run(JSON.stringify(record), new Date().toISOString(), id, kind)
+    .run(JSON.stringify(record), now, id, kind)
   return record
 }
 
 function listSponsorLeads() {
-  return db.prepare('SELECT data FROM sponsor_leads ORDER BY created_at DESC').all().map((row) => JSON.parse(row.data))
+  return db.prepare('SELECT data, updated_at FROM sponsor_leads ORDER BY created_at DESC').all().map((row) => {
+    const record = JSON.parse(row.data)
+    record.updatedAt = row.updated_at
+    record.activity = Array.isArray(record.activity) ? record.activity : []
+    return record
+  })
 }
 
 function createSponsorLead(data) {
   const now = new Date().toISOString()
-  const record = { ...data, id: randomUUID(), status: 'New', createdAt: now.slice(0, 10) }
+  const record = {
+    ...data,
+    id: randomUUID(),
+    status: 'New',
+    createdAt: now.slice(0, 10),
+    updatedAt: now,
+    activity: [activityEntry(data.createdBy, 'Record created', 'update', now)],
+  }
   db.prepare('INSERT INTO sponsor_leads (id, data, created_at, updated_at) VALUES (?, ?, ?, ?)')
     .run(record.id, JSON.stringify(record), now, now)
   return record
 }
 
-function updateSponsorLead(id, changes) {
+function updateSponsorLead(id, changes, actor) {
   const row = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(id)
   if (!row) return null
-  const record = { ...JSON.parse(row.data), ...changes }
+  const previous = JSON.parse(row.data)
+  const now = new Date().toISOString()
+  const record = {
+    ...previous,
+    ...changes,
+    updatedAt: now,
+    activity: [...(Array.isArray(previous.activity) ? previous.activity : []), activityEntry(actor, updateBody(changes), 'update', now)].slice(-100),
+  }
   db.prepare('UPDATE sponsor_leads SET data = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(record), new Date().toISOString(), id)
+    .run(JSON.stringify(record), now, id)
+  return record
+}
+
+function addRecordActivity(kind, id, actor, body) {
+  const table = kind === 'sponsor_lead' ? 'sponsor_leads' : 'records'
+  const query = table === 'records'
+    ? db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(id, kind)
+    : db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(id)
+  if (!query) return null
+  const previous = JSON.parse(query.data)
+  const now = new Date().toISOString()
+  const record = {
+    ...previous,
+    updatedAt: now,
+    activity: [...(Array.isArray(previous.activity) ? previous.activity : []), activityEntry(actor, body, 'note', now)].slice(-100),
+  }
+  if (table === 'records') {
+    db.prepare('UPDATE records SET data = ?, updated_at = ? WHERE id = ? AND kind = ?').run(JSON.stringify(record), now, id, kind)
+  } else {
+    db.prepare('UPDATE sponsor_leads SET data = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(record), now, id)
+  }
   return record
 }
 
@@ -199,7 +270,7 @@ function canReviewSubteamChanges(user) {
 
 function validateAssignee(res, assigneeId, requesterSubteam) {
   if (!assigneeId) return true
-  const assignee = db.prepare('SELECT subteam FROM users WHERE id = ?').get(assigneeId)
+  const assignee = db.prepare('SELECT subteam FROM users WHERE id = ? AND active = 1').get(assigneeId)
   const allowedSubteams = new Set(['business', requesterSubteam.trim().toLowerCase()])
   if (!assignee || !allowedSubteams.has(assignee.subteam.trim().toLowerCase())) {
     res.status(400).json({ error: 'Choose a member from the Business subteam or the requester’s subteam.' })
@@ -210,7 +281,7 @@ function validateAssignee(res, assigneeId, requesterSubteam) {
 
 function validateAssigneeSubteam(res, assigneeId, subteam) {
   if (!assigneeId) return true
-  const assignee = db.prepare('SELECT subteam FROM users WHERE id = ?').get(assigneeId)
+  const assignee = db.prepare('SELECT subteam FROM users WHERE id = ? AND active = 1').get(assigneeId)
   if (!assignee || assignee.subteam.trim().toLowerCase() !== subteam.trim().toLowerCase()) {
     res.status(400).json({ error: 'Choose a member from your subteam.' })
     return false
@@ -220,7 +291,7 @@ function validateAssigneeSubteam(res, assigneeId, subteam) {
 
 function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssigneeId) {
   if (isDev(user)) {
-    if (!assigneeId || db.prepare('SELECT id FROM users WHERE id = ?').get(assigneeId)) return true
+    if (!assigneeId || db.prepare('SELECT id FROM users WHERE id = ? AND active = 1').get(assigneeId)) return true
     res.status(400).json({ error: 'Choose an existing team member.' })
     return false
   }
@@ -240,6 +311,30 @@ function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssig
   return false
 }
 
+async function sendAssignmentNotification(res, actor, assigneeId, previousAssigneeId, taskType, taskTitle, nextFollowUpAt) {
+  if (!assigneeId || assigneeId === previousAssigneeId || assigneeId === actor.id) return true
+  const assignee = db.prepare('SELECT email, display_name FROM users WHERE id = ? AND active = 1').get(assigneeId)
+  if (!assignee) {
+    res.status(400).json({ error: 'Choose an active team member to assign this task.' })
+    return false
+  }
+  try {
+    await sendTaskAssignmentEmail({
+      email: assignee.email,
+      displayName: assignee.display_name,
+      assignedBy: actor.displayName,
+      taskType,
+      taskTitle,
+      nextFollowUpAt,
+    })
+    return true
+  } catch (error) {
+    console.error('Could not send task assignment email:', error)
+    res.status(502).json({ error: 'Could not send the assignment email. The task was not changed; check email settings and try again.' })
+    return false
+  }
+}
+
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
 
 app.post('/api/auth/register', authLimiter, async (req, res, next) => {
@@ -254,7 +349,7 @@ app.post('/api/auth/register', authLimiter, async (req, res, next) => {
     db.prepare('INSERT INTO users (id, email, display_name, subteam, tag, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(id, input.email, input.displayName, input.subteam, tag, hash, new Date().toISOString())
     issueSession(res, id)
-    res.status(201).json({ user: { id, email: input.email, displayName: input.displayName, subteam: input.subteam, tag } })
+    res.status(201).json({ user: { id, email: input.email, displayName: input.displayName, subteam: input.subteam, tag, active: true } })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
     next(error)
@@ -266,7 +361,7 @@ app.post('/api/auth/login', authLimiter, async (req, res, next) => {
   if (!input) return
 
   try {
-    const user = db.prepare('SELECT * FROM users WHERE email = ? COLLATE NOCASE').get(input.email)
+    const user = db.prepare('SELECT * FROM users WHERE email = ? COLLATE NOCASE AND active = 1').get(input.email)
     if (!user || !(await passwordMatches(input.password, user.password_hash))) {
       return res.status(401).json({ error: 'Email or password is incorrect.' })
     }
@@ -346,7 +441,7 @@ app.patch('/api/account', requireAuth, (req, res) => {
   try {
     db.prepare('UPDATE users SET display_name = ?, email = ? WHERE id = ?')
       .run(input.displayName, input.email, req.user.id)
-    const updated = db.prepare('SELECT id, email, display_name, subteam, tag FROM users WHERE id = ?').get(req.user.id)
+    const updated = db.prepare('SELECT id, email, display_name, subteam, tag, active FROM users WHERE id = ?').get(req.user.id)
     res.json({ user: publicUser(updated) })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
@@ -472,12 +567,14 @@ app.delete('/api/account', requireAuth, async (req, res, next) => {
 })
 
 app.get('/api/team-members', requireAuth, (_req, res) => {
-  const members = db.prepare('SELECT id, display_name AS displayName, subteam FROM users ORDER BY display_name').all()
+  const members = db.prepare('SELECT id, display_name AS displayName, subteam, active = 1 AS active FROM users ORDER BY display_name').all()
+    .map((member) => ({ ...member, active: Boolean(member.active) }))
   res.json({ members })
 })
 
 app.get('/api/management/users', requireAuth, requireDev, (_req, res) => {
-  const users = db.prepare('SELECT id, email, display_name AS displayName, subteam, tag FROM users ORDER BY display_name').all()
+  const users = db.prepare('SELECT id, email, display_name, subteam, tag, active FROM users ORDER BY active DESC, display_name').all()
+    .map(publicUser)
   res.json({ users })
 })
 
@@ -485,10 +582,19 @@ app.patch('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
   const input = parseBody(managementUserPatchSchema, req, res)
   if (!input) return
   try {
-    const result = db.prepare('UPDATE users SET display_name = ?, email = ?, subteam = ?, tag = COALESCE(?, tag) WHERE id = ?')
-      .run(input.displayName, input.email, input.subteam, input.tag ?? null, req.params.id)
-    if (!result.changes) return res.status(404).json({ error: 'Team member not found.' })
-    const updated = db.prepare('SELECT id, email, display_name, subteam, tag FROM users WHERE id = ?').get(req.params.id)
+    if (input.active === false && req.params.id === req.user.id) return res.status(400).json({ error: 'You cannot deactivate your own account.' })
+    const updateManagedUser = db.transaction(() => {
+      const result = db.prepare('UPDATE users SET display_name = ?, email = ?, subteam = ?, tag = COALESCE(?, tag), active = COALESCE(?, active) WHERE id = ?')
+        .run(input.displayName, input.email, input.subteam, input.tag ?? null, input.active === undefined ? null : Number(input.active), req.params.id)
+      if (!result.changes) return null
+      if (input.active === false) {
+        db.prepare('DELETE FROM sessions WHERE user_id = ?').run(req.params.id)
+        db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').run(req.params.id)
+      }
+      return db.prepare('SELECT id, email, display_name, subteam, tag, active FROM users WHERE id = ?').get(req.params.id)
+    })
+    const updated = updateManagedUser()
+    if (!updated) return res.status(404).json({ error: 'Team member not found.' })
     res.json({ user: publicUser(updated) })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
@@ -540,31 +646,39 @@ app.delete('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
   res.status(204).end()
 })
 
-app.patch('/api/management/requests/:id', requireAuth, requireDev, (req, res) => {
+app.patch('/api/management/requests/:id', requireAuth, requireDev, async (req, res) => {
   const input = parseBody(managementPartRequestPatchSchema, req, res)
   if (!input) return
   const existing = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(req.params.id, 'part_request')
   if (!existing) return res.status(404).json({ error: 'Part request not found.' })
-  if (Object.hasOwn(input, 'assigneeId') && !authorizeAssignee(res, req.user, input.assigneeId, JSON.parse(existing.data).requesterSubteam || '', JSON.parse(existing.data).assigneeId)) return
-  const record = updateRecord('part_request', req.params.id, input)
+  const previous = JSON.parse(existing.data)
+  if (Object.hasOwn(input, 'assigneeId')) {
+    if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || '', previous.assigneeId)) return
+    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Part request', input.item || previous.item, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
+  }
+  const record = updateRecord('part_request', req.params.id, input, req.user.displayName)
   res.json({ record })
 })
 
 app.patch('/api/management/sponsorships/:id', requireAuth, requireDev, (req, res) => {
   const input = parseBody(sponsorshipPatchSchema, req, res)
   if (!input) return
-  const record = updateRecord('sponsorship', req.params.id, input)
+  const record = updateRecord('sponsorship', req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
   res.json({ record })
 })
 
-app.patch('/api/management/sponsor-leads/:id', requireAuth, requireDev, (req, res) => {
+app.patch('/api/management/sponsor-leads/:id', requireAuth, requireDev, async (req, res) => {
   const input = parseBody(managementSponsorLeadPatchSchema, req, res)
   if (!input) return
   const existing = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(req.params.id)
   if (!existing) return res.status(404).json({ error: 'Sponsor lead not found.' })
-  if (Object.hasOwn(input, 'assigneeId') && !authorizeAssignee(res, req.user, input.assigneeId, JSON.parse(existing.data).requesterSubteam || '', JSON.parse(existing.data).assigneeId)) return
-  const record = updateSponsorLead(req.params.id, input)
+  const previous = JSON.parse(existing.data)
+  if (Object.hasOwn(input, 'assigneeId')) {
+    if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || '', previous.assigneeId)) return
+    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Sponsor lead', input.company || previous.company, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
+  }
+  const record = updateSponsorLead(req.params.id, input, req.user.displayName)
   res.json({ record })
 })
 
@@ -575,19 +689,31 @@ app.post('/api/requests', requireAuth, (req, res) => {
   const record = createRecord('part_request', { ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
   res.status(201).json({ record })
 })
-app.patch('/api/requests/:id', requireAuth, (req, res) => {
-  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to edit shared records.' })
+app.patch('/api/requests/:id', requireAuth, async (req, res) => {
   const input = parseBody(partRequestPatchSchema, req, res)
   if (!input) return
+  const followUpOnly = Object.keys(input).every((key) => key === 'nextFollowUpAt')
+  if (!canEditSharedRecords(req.user) && !(canDelegate(req.user) && followUpOnly)) {
+    return res.status(403).json({ error: 'STL or Dev access is required to edit shared records. Exec may update follow-up dates.' })
+  }
   if (Object.hasOwn(input, 'assigneeId')) {
     const existing = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(req.params.id, 'part_request')
     if (!existing) return res.status(404).json({ error: 'Part request not found.' })
     const record = JSON.parse(existing.data)
     if (!authorizeAssignee(res, req.user, input.assigneeId, record.requesterSubteam || record.subteam, record.assigneeId)) return
+    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, record.assigneeId, 'Part request', input.item || record.item, input.nextFollowUpAt ?? record.nextFollowUpAt)) return
   }
-  const record = updateRecord('part_request', req.params.id, input)
+  const record = updateRecord('part_request', req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Part request not found.' })
   res.json({ record })
+})
+app.post('/api/requests/:id/activity', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to add record notes.' })
+  const input = parseBody(recordActivitySchema, req, res)
+  if (!input) return
+  const record = addRecordActivity('part_request', req.params.id, req.user.displayName, input.body)
+  if (!record) return res.status(404).json({ error: 'Part request not found.' })
+  res.status(201).json({ record })
 })
 app.delete('/api/requests/:id', requireAuth, (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
@@ -604,12 +730,23 @@ app.post('/api/sponsorships', requireAuth, (req, res) => {
   res.status(201).json({ record })
 })
 app.patch('/api/sponsorships/:id', requireAuth, (req, res) => {
-  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to edit shared records.' })
   const input = parseBody(sponsorshipPatchSchema, req, res)
   if (!input) return
-  const record = updateRecord('sponsorship', req.params.id, input)
+  const followUpOnly = Object.keys(input).every((key) => key === 'renewal')
+  if (!canEditSharedRecords(req.user) && !(canDelegate(req.user) && followUpOnly)) {
+    return res.status(403).json({ error: 'STL or Dev access is required to edit shared records. Exec may update renewal / follow-up dates.' })
+  }
+  const record = updateRecord('sponsorship', req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
   res.json({ record })
+})
+app.post('/api/sponsorships/:id/activity', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to add record notes.' })
+  const input = parseBody(recordActivitySchema, req, res)
+  if (!input) return
+  const record = addRecordActivity('sponsorship', req.params.id, req.user.displayName, input.body)
+  if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
+  res.status(201).json({ record })
 })
 app.delete('/api/sponsorships/:id', requireAuth, (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
@@ -625,19 +762,31 @@ app.post('/api/sponsor-leads', requireAuth, (req, res) => {
   const record = createSponsorLead({ ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
   res.status(201).json({ record })
 })
-app.patch('/api/sponsor-leads/:id', requireAuth, (req, res) => {
-  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to edit shared records.' })
+app.patch('/api/sponsor-leads/:id', requireAuth, async (req, res) => {
   const input = parseBody(sponsorLeadPatchSchema, req, res)
   if (!input) return
+  const followUpOnly = Object.keys(input).every((key) => key === 'nextFollowUpAt')
+  if (!canEditSharedRecords(req.user) && !(canDelegate(req.user) && followUpOnly)) {
+    return res.status(403).json({ error: 'STL or Dev access is required to edit shared records. Exec may update follow-up dates.' })
+  }
   if (Object.hasOwn(input, 'assigneeId')) {
     const existing = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(req.params.id)
     if (!existing) return res.status(404).json({ error: 'Sponsor lead not found.' })
     const record = JSON.parse(existing.data)
     if (!authorizeAssignee(res, req.user, input.assigneeId, record.requesterSubteam || record.subteam || '', record.assigneeId)) return
+    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, record.assigneeId, 'Sponsor lead', input.company || record.company, input.nextFollowUpAt ?? record.nextFollowUpAt)) return
   }
-  const record = updateSponsorLead(req.params.id, input)
+  const record = updateSponsorLead(req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Sponsor lead not found.' })
   res.json({ record })
+})
+app.post('/api/sponsor-leads/:id/activity', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to add record notes.' })
+  const input = parseBody(recordActivitySchema, req, res)
+  if (!input) return
+  const record = addRecordActivity('sponsor_lead', req.params.id, req.user.displayName, input.body)
+  if (!record) return res.status(404).json({ error: 'Sponsor lead not found.' })
+  res.status(201).json({ record })
 })
 app.delete('/api/sponsor-leads/:id', requireAuth, (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })

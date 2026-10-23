@@ -78,6 +78,9 @@ if (!userColumns.some((column) => column.name === 'subteam')) {
 if (!userColumns.some((column) => column.name === 'tag')) {
   db.exec("ALTER TABLE users ADD COLUMN tag TEXT NOT NULL DEFAULT 'member' CHECK(tag IN ('member', 'dev', 'stl'))")
 }
+if (!userColumns.some((column) => column.name === 'active')) {
+  db.exec('ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1))')
+}
 
 const userTableSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get().sql
 if (!/\bstl\b/i.test(userTableSql)) {
@@ -92,10 +95,11 @@ if (!/\bstl\b/i.test(userTableSql)) {
           password_hash TEXT NOT NULL,
           created_at TEXT NOT NULL,
           subteam TEXT NOT NULL DEFAULT '',
-          tag TEXT NOT NULL DEFAULT 'member' CHECK(tag IN ('member', 'dev', 'stl'))
+          tag TEXT NOT NULL DEFAULT 'member' CHECK(tag IN ('member', 'dev', 'stl')),
+          active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1))
         );
-        INSERT INTO users_with_stl (id, email, display_name, password_hash, created_at, subteam, tag)
-          SELECT id, email, display_name, password_hash, created_at, subteam, tag FROM users;
+        INSERT INTO users_with_stl (id, email, display_name, password_hash, created_at, subteam, tag, active)
+          SELECT id, email, display_name, password_hash, created_at, subteam, tag, active FROM users;
         DROP TABLE users;
         ALTER TABLE users_with_stl RENAME TO users;
       `)

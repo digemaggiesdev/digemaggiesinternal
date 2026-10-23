@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createServer as createHttpServer } from 'node:http'
 import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { NetlifyDB } from '@netlify/database-dev'
@@ -11,18 +12,39 @@ const devInviteCode = 'netlify-function-dev-invite'
 let netlifyDb
 let database
 let handler
+let emailServer
+let emailPort
+const sentEmails = []
 
 before(async () => {
+  emailServer = createHttpServer((req, res) => {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => {
+      sentEmails.push(JSON.parse(Buffer.concat(chunks).toString()))
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ id: 'test-email-id' }))
+    })
+  })
+  await new Promise((resolve, reject) => emailServer.listen(0, '127.0.0.1', resolve).once('error', reject))
+  emailPort = emailServer.address().port
   netlifyDb = new NetlifyDB()
   const connectionString = await netlifyDb.start()
   await netlifyDb.applyMigrations(migrationPath)
   database = getDatabase({ connectionString })
-  handler = createApiHandler(database, { TEAM_INVITE_CODE: inviteCode, DEV_INVITE_CODE: devInviteCode })
+  handler = createApiHandler(database, {
+    TEAM_INVITE_CODE: inviteCode,
+    DEV_INVITE_CODE: devInviteCode,
+    RESEND_API_KEY: 'test-resend-key',
+    RESEND_FROM: 'DiGem Test <test@example.com>',
+    RESEND_API_URL: `http://127.0.0.1:${emailPort}`,
+    APP_URL: 'https://digem.example.netlify.app',
+  })
 })
 
 after(async () => {
   await database?.pool.end()
   await netlifyDb?.stop()
+  await new Promise((resolve, reject) => emailServer?.close((error) => error ? reject(error) : resolve()))
 })
 
 function jsonRequest(path, { method = 'GET', body, cookie } = {}) {
@@ -127,6 +149,25 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const { user: devUser } = await devPromotion.json()
   assert.equal(devUser.tag, 'dev')
   assert.equal(devUser.subteam, 'Business')
+  const stlRegistration = await handler(jsonRequest('/api/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Netlify STL Member',
+      subteam: 'Controls',
+      email: 'netlify-stl-member@example.com',
+      password: 'a-long-netlify-stl-password',
+      inviteCode,
+    },
+  }))
+  assert.equal(stlRegistration.status, 201)
+  const { user: stlUser } = await stlRegistration.clone().json()
+  const stlCookie = stlRegistration.headers.get('set-cookie').split(';')[0]
+  const grantStlTag = await handler(jsonRequest(`/api/management/users/${stlUser.id}`, {
+    method: 'PATCH',
+    body: { displayName: stlUser.displayName, email: stlUser.email, subteam: stlUser.subteam, tag: 'stl' },
+    cookie: devCookie,
+  }))
+  assert.equal((await grantStlTag.json()).user.tag, 'stl')
   const promotedSession = await handler(jsonRequest('/api/auth/me', { cookie: devCookie }))
   assert.equal((await promotedSession.json()).user.tag, 'dev')
   const regularMemberCannotManage = await handler(jsonRequest('/api/management/users', { cookie }))
@@ -174,12 +215,15 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const memberPartEdit = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { specs: 'Updated by a regular member', compatibility: 'Verified against the build' }, cookie,
   }))
-  assert.equal(memberPartEdit.status, 200)
-  assert.equal((await memberPartEdit.json()).record.specs, 'Updated by a regular member')
+  assert.equal(memberPartEdit.status, 403)
+  const stlPartEdit = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { specs: 'Updated by STL', compatibility: 'Verified against the build' }, cookie: stlCookie,
+  }))
+  assert.equal((await stlPartEdit.json()).record.specs, 'Updated by STL')
   const selfAssignedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: requester.id }, cookie,
   }))
-  assert.equal((await selfAssignedPart.json()).record.assigneeId, requester.id)
+  assert.equal(selfAssignedPart.status, 403)
   const nonExecAssignment = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: businessUser.id }, cookie,
   }))
@@ -187,7 +231,7 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const assignedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: businessUser.id }, cookie: businessCookie,
   }))
-  assert.equal((await assignedPart.json()).record.assigneeId, businessUser.id)
+  assert.equal(assignedPart.status, 403)
   const businessCannotAssignOthers = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: requester.id }, cookie: businessCookie,
   }))
@@ -199,19 +243,36 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const execAssignedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: requester.id }, cookie: execCookie,
   }))
-  assert.equal((await execAssignedPart.json()).record.assigneeId, requester.id)
+  assert.equal(execAssignedPart.status, 403)
   const execSelfAssignment = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: execUser.id }, cookie: execCookie,
   }))
-  assert.equal((await execSelfAssignment.json()).record.assigneeId, execUser.id)
+  assert.equal(execSelfAssignment.status, 403)
   const ineligibleExecTarget = await handler(jsonRequest(`/api/requests/${part.id}`, {
     method: 'PATCH', body: { assigneeId: 'missing-target' }, cookie: execCookie,
   }))
-  assert.equal(ineligibleExecTarget.status, 400)
+  assert.equal(ineligibleExecTarget.status, 403)
   const updatedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
-    method: 'PATCH', body: { status: 'In transit' }, cookie,
+    method: 'PATCH', body: { status: 'In transit' }, cookie: stlCookie,
   }))
   assert.equal((await updatedPart.json()).record.status, 'In transit')
+  const stlAssignment = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { assigneeId: requester.id }, cookie: stlCookie,
+  }))
+  assert.equal((await stlAssignment.json()).record.assigneeId, requester.id)
+  const stlCannotAssignOutsideSubteam = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { assigneeId: businessUser.id }, cookie: stlCookie,
+  }))
+  assert.equal(stlCannotAssignOutsideSubteam.status, 400)
+  await database.sql`UPDATE users SET tag = 'stl' WHERE id = ${execUser.id}`
+  const execStlAssignment = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { assigneeId: businessUser.id }, cookie: execCookie,
+  }))
+  assert.equal((await execStlAssignment.json()).record.assigneeId, businessUser.id)
+  const devUpdatedPart = await handler(jsonRequest(`/api/requests/${part.id}`, {
+    method: 'PATCH', body: { priority: 'Urgent' }, cookie: devCookie,
+  }))
+  assert.equal(devUpdatedPart.status, 200)
   const listedParts = await handler(jsonRequest('/api/requests', { cookie }))
   assert.equal((await listedParts.json()).records[0].id, part.id)
 
@@ -224,11 +285,15 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const { record: sponsor } = await createdSponsor.json()
   assert.deepEqual(sponsor.deliverables, [{ description: 'Demo invitation', status: 'Not started' }])
   const updatedSponsor = await handler(jsonRequest(`/api/sponsorships/${sponsor.id}`, {
-    method: 'PATCH', body: { status: 'Received' }, cookie,
+    method: 'PATCH', body: { status: 'Received' }, cookie: stlCookie,
   }))
   assert.equal((await updatedSponsor.json()).record.status, 'Received')
+  const memberSponsorEdit = await handler(jsonRequest(`/api/sponsorships/${sponsor.id}`, {
+    method: 'PATCH', body: { contact: 'Edited by a regular member' }, cookie,
+  }))
+  assert.equal(memberSponsorEdit.status, 403)
   const editedSponsor = await handler(jsonRequest(`/api/sponsorships/${sponsor.id}`, {
-    method: 'PATCH', body: { ...sponsorInput, company: 'Edited Netlify Sponsor', deliverables: ['Logo placement', 'Demo invitation'] }, cookie,
+    method: 'PATCH', body: { ...sponsorInput, company: 'Edited Netlify Sponsor', deliverables: ['Logo placement', 'Demo invitation'] }, cookie: stlCookie,
   }))
   const editedSponsorRecord = (await editedSponsor.json()).record
   assert.equal(editedSponsorRecord.company, 'Edited Netlify Sponsor')
@@ -242,7 +307,7 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
       { description: 'Logo placement', status: 'Completed' },
       { description: 'Demo invitation', status: 'In progress' },
     ] },
-    cookie,
+    cookie: stlCookie,
   }))
   assert.deepEqual((await sponsorDeliveryStatus.json()).record.deliverables, [
     { description: 'Logo placement', status: 'Completed' },
@@ -255,7 +320,9 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   }))
   assert.equal(managedSponsor.status, 200, await managedSponsor.clone().text())
   assert.equal((await managedSponsor.json()).record.contact, 'Dev edited Netlify sponsor')
-  const deletedSponsor = await handler(jsonRequest(`/api/sponsorships/${sponsor.id}`, { method: 'DELETE', cookie }))
+  const deniedSponsorDelete = await handler(jsonRequest(`/api/sponsorships/${sponsor.id}`, { method: 'DELETE', cookie }))
+  assert.equal(deniedSponsorDelete.status, 403)
+  const deletedSponsor = await handler(jsonRequest(`/api/sponsorships/${sponsor.id}`, { method: 'DELETE', cookie: stlCookie }))
   assert.equal(deletedSponsor.status, 204)
 
   const input = {
@@ -273,20 +340,31 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   const memberLeadEdit = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
     method: 'PATCH', body: { details: 'Updated by a regular member', estimatedAmount: 250 }, cookie,
   }))
-  assert.equal(memberLeadEdit.status, 200)
-  assert.equal((await memberLeadEdit.json()).record.details, 'Updated by a regular member')
+  assert.equal(memberLeadEdit.status, 403)
+  const stlLeadEdit = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
+    method: 'PATCH', body: { details: 'Updated by STL', estimatedAmount: 250 }, cookie: stlCookie,
+  }))
+  assert.equal((await stlLeadEdit.json()).record.details, 'Updated by STL')
   const selfAssignedLead = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
     method: 'PATCH', body: { assigneeId: requester.id }, cookie,
   }))
-  assert.equal((await selfAssignedLead.json()).record.assigneeId, requester.id)
+  assert.equal(selfAssignedLead.status, 403)
   const nonExecLeadAssignment = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
     method: 'PATCH', body: { assigneeId: businessUser.id }, cookie,
   }))
   assert.equal(nonExecLeadAssignment.status, 403)
+  const stlLeadAssignment = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
+    method: 'PATCH', body: { assigneeId: requester.id }, cookie: stlCookie,
+  }))
+  assert.equal((await stlLeadAssignment.json()).record.assigneeId, requester.id)
+  const stlLeadCannotAssignOutsideSubteam = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
+    method: 'PATCH', body: { assigneeId: businessUser.id }, cookie: stlCookie,
+  }))
+  assert.equal(stlLeadCannotAssignOutsideSubteam.status, 400)
   const assignedLead = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
     method: 'PATCH', body: { assigneeId: businessUser.id }, cookie: businessCookie,
   }))
-  assert.equal((await assignedLead.json()).record.assigneeId, businessUser.id)
+  assert.equal(assignedLead.status, 403)
   const businessCannotAssignLeadToOthers = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
     method: 'PATCH', body: { assigneeId: requester.id }, cookie: businessCookie,
   }))
@@ -297,7 +375,7 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal((await execAssignsLead.json()).record.assigneeId, requester.id)
 
   const updated = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, {
-    method: 'PATCH', body: { status: 'Following up' }, cookie,
+    method: 'PATCH', body: { status: 'Following up' }, cookie: stlCookie,
   }))
   assert.equal((await updated.json()).record.status, 'Following up')
 
@@ -371,7 +449,15 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
     body: { displayName: businessUser.displayName, email: businessUser.email, subteam: 'Exec' },
     cookie: devCookie,
   }))
-  assert.equal((await assignedExec.json()).user.subteam, 'Exec')
+  const assignedExecUser = (await assignedExec.json()).user
+  assert.equal(assignedExecUser.subteam, 'Exec')
+  assert.equal(assignedExecUser.tag, 'member')
+  const invalidAccessTag = await handler(jsonRequest(`/api/management/users/${businessUser.id}`, {
+    method: 'PATCH',
+    body: { displayName: businessUser.displayName, email: businessUser.email, subteam: 'Exec', tag: 'admin' },
+    cookie: devCookie,
+  }))
+  assert.equal(invalidAccessTag.status, 400)
   const managedPart = await handler(jsonRequest(`/api/management/requests/${part.id}`, {
     method: 'PATCH', body: { item: 'Dev edited netlify fitting', priority: 'Urgent' }, cookie: devCookie,
   }))
@@ -460,8 +546,61 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal(remainingLead.assigneeId, undefined)
   const membersAfterDeletion = await handler(jsonRequest('/api/team-members', { cookie: businessCookie }))
   assert.equal((await membersAfterDeletion.json()).members.some((member) => member.id === requester.id), false)
-  const deletedPart = await handler(jsonRequest(`/api/requests/${part.id}`, { method: 'DELETE', cookie: businessCookie }))
+  const deniedPartDelete = await handler(jsonRequest(`/api/requests/${part.id}`, { method: 'DELETE', cookie: businessCookie }))
+  assert.equal(deniedPartDelete.status, 403)
+  const deletedPart = await handler(jsonRequest(`/api/requests/${part.id}`, { method: 'DELETE', cookie: stlCookie }))
   assert.equal(deletedPart.status, 204)
-  const deletedLead = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, { method: 'DELETE', cookie: businessCookie }))
+  const deniedLeadDelete = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, { method: 'DELETE', cookie: businessCookie }))
+  assert.equal(deniedLeadDelete.status, 403)
+  const deletedLead = await handler(jsonRequest(`/api/sponsor-leads/${record.id}`, { method: 'DELETE', cookie: stlCookie }))
   assert.equal(deletedLead.status, 204)
+  const memberCannotResetPassword = await handler(jsonRequest(`/api/management/users/${stlUser.id}/password-reset`, {
+    method: 'POST', cookie: businessCookie,
+  }))
+  assert.equal(memberCannotResetPassword.status, 403)
+  const invalidPasswordReset = await handler(jsonRequest('/api/auth/password-reset', {
+    method: 'POST', body: { token: 'invalid-reset-token-value', password: 'short' },
+  }))
+  assert.equal(invalidPasswordReset.status, 400)
+  const sentResetEmail = await handler(jsonRequest(`/api/management/users/${stlUser.id}/password-reset`, {
+    method: 'POST', cookie: devCookie,
+  }))
+  assert.equal(sentResetEmail.status, 204)
+  const emailMessage = sentEmails.at(-1)
+  assert.deepEqual(emailMessage.to, [stlUser.email])
+  const resetToken = new URL(emailMessage.text.match(/https:\/\/digem\.example\.netlify\.app\/#[^\s]+/)[0]).hash.slice(1).split('=')[1]
+  assert.ok(resetToken)
+  const [storedResetToken] = await database.sql`SELECT token_hash FROM password_reset_tokens WHERE user_id = ${stlUser.id}`
+  assert.notEqual(storedResetToken.token_hash, resetToken)
+  const resetPassword = await handler(jsonRequest('/api/auth/password-reset', {
+    method: 'POST', body: { token: resetToken, password: 'a-new-temporary-password' },
+  }))
+  assert.equal(resetPassword.status, 204)
+  const reusedResetLink = await handler(jsonRequest('/api/auth/password-reset', {
+    method: 'POST', body: { token: resetToken, password: 'another-new-password-value' },
+  }))
+  assert.equal(reusedResetLink.status, 400)
+  const revokedSession = await handler(jsonRequest('/api/auth/me', { cookie: stlCookie }))
+  assert.equal(revokedSession.status, 401)
+  const oldPasswordLogin = await handler(jsonRequest('/api/auth/login', {
+    method: 'POST', body: { email: stlUser.email, password: 'a-long-netlify-stl-password' },
+  }))
+  assert.equal(oldPasswordLogin.status, 401)
+  const newPasswordLogin = await handler(jsonRequest('/api/auth/login', {
+    method: 'POST', body: { email: stlUser.email, password: 'a-new-temporary-password' },
+  }))
+  assert.equal(newPasswordLogin.status, 200)
+
+  const sentEmailCount = sentEmails.length
+  const unknownAccountReset = await handler(jsonRequest('/api/auth/password-reset/request', {
+    method: 'POST', body: { email: 'unknown-account@example.com' },
+  }))
+  const knownAccountReset = await handler(jsonRequest('/api/auth/password-reset/request', {
+    method: 'POST', body: { email: stlUser.email },
+  }))
+  assert.equal(unknownAccountReset.status, 202)
+  assert.equal(knownAccountReset.status, 202)
+  assert.deepEqual(await unknownAccountReset.json(), await knownAccountReset.json())
+  assert.equal(sentEmails.length, sentEmailCount + 1)
+  assert.deepEqual(sentEmails.at(-1).to, [stlUser.email])
 })

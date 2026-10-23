@@ -39,6 +39,16 @@ export const managementUserPatchSchema = z.object({
   displayName: z.string().trim().min(2).max(100),
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
   subteam: z.string().trim().min(1).max(100),
+  tag: z.enum(['member', 'stl']).optional(),
+}).strict()
+
+export const passwordResetSchema = z.object({
+  token: z.string().min(20).max(200),
+  password: z.string().min(12).max(128),
+}).strict()
+
+export const passwordResetRequestSchema = z.object({
+  email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
 }).strict()
 
 export const subteamChangeRequestSchema = z.object({

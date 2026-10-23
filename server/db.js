@@ -26,6 +26,14 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
 
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx ON password_reset_tokens(user_id);
+
   CREATE TABLE IF NOT EXISTS records (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('part_request', 'sponsorship')),
@@ -68,7 +76,33 @@ if (!userColumns.some((column) => column.name === 'subteam')) {
   db.exec("ALTER TABLE users ADD COLUMN subteam TEXT NOT NULL DEFAULT ''")
 }
 if (!userColumns.some((column) => column.name === 'tag')) {
-  db.exec("ALTER TABLE users ADD COLUMN tag TEXT NOT NULL DEFAULT 'member' CHECK(tag IN ('member', 'dev'))")
+  db.exec("ALTER TABLE users ADD COLUMN tag TEXT NOT NULL DEFAULT 'member' CHECK(tag IN ('member', 'dev', 'stl'))")
+}
+
+const userTableSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get().sql
+if (!/\bstl\b/i.test(userTableSql)) {
+  db.pragma('foreign_keys = OFF')
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE users_with_stl (
+          id TEXT PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          display_name TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          subteam TEXT NOT NULL DEFAULT '',
+          tag TEXT NOT NULL DEFAULT 'member' CHECK(tag IN ('member', 'dev', 'stl'))
+        );
+        INSERT INTO users_with_stl (id, email, display_name, password_hash, created_at, subteam, tag)
+          SELECT id, email, display_name, password_hash, created_at, subteam, tag FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_with_stl RENAME TO users;
+      `)
+    })()
+  } finally {
+    db.pragma('foreign_keys = ON')
+  }
 }
 
 db.prepare(`

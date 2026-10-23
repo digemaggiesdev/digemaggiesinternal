@@ -38,9 +38,12 @@ import {
   getManagementUsers,
   deleteAccount,
   deleteManagementUser,
+  emailManagementUserPasswordReset,
   cancelSubteamChangeRequest,
   requestSubteamChange,
+  requestPasswordReset,
   reviewSubteamChangeRequest,
+  resetPassword,
   signIn,
   signOut,
   signUp,
@@ -89,17 +92,17 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
   label: string
   onChange: (assigneeId: string) => void
 }) {
-  const eligibleMembers = members.filter((member) => {
-    const subteam = member.subteam.trim().toLowerCase()
-    return member.id === user?.id || user?.tag === 'dev' || subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase()
-  })
+  const canEdit = user?.tag === 'dev' || user?.tag === 'stl'
+  const userSubteam = user?.subteam.trim().toLowerCase() || ''
+  const sourceSubteam = requesterSubteam.trim().toLowerCase()
+  const visibleMembers = user?.tag === 'dev'
+    ? members
+    : user?.tag === 'stl' && userSubteam === 'exec'
+      ? members.filter((member) => member.id === user.id || ['business', sourceSubteam].includes(member.subteam.trim().toLowerCase()))
+      : user?.tag === 'stl'
+        ? members.filter((member) => member.subteam.trim().toLowerCase() === userSubteam)
+        : members
   const currentAssignee = members.find((member) => member.id === assignedId)
-  const isExec = user?.tag === 'dev' || user?.subteam.trim().toLowerCase() === 'exec'
-  const canAssignSelf = Boolean(user && (
-    user.subteam.trim().toLowerCase() === 'business'
-    || user.subteam.trim().toLowerCase() === requesterSubteam.trim().toLowerCase()
-  ))
-  const canEdit = Boolean(isExec || canAssignSelf)
   const currentAssigneeLabel = currentAssignee
     ? `${currentAssignee.displayName} · ${currentAssignee.subteam}`
     : assignedId ? 'Assigned member' : 'Unassigned'
@@ -111,16 +114,9 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
     disabled={!canEdit}
     onChange={(event) => onChange(event.target.value)}
   >
-    {isExec
-      ? <>
-        <option value="">Unassigned</option>
-        {eligibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}{member.id === user?.id ? ' (You)' : ''}</option>)}
-        {assignedId && !eligibleMembers.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
-      </>
-      : <>
-        <option value={assignedId || ''} disabled={Boolean(assignedId && assignedId !== user?.id)}>{currentAssigneeLabel}</option>
-        {canAssignSelf && user && assignedId !== user.id && <option value={user.id}>Assign to me ({user.displayName})</option>}
-      </>}
+    <option value="">{canEdit ? 'Unassigned' : currentAssigneeLabel}</option>
+    {visibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}{member.id === user?.id ? ' (You)' : ''}</option>)}
+    {assignedId && !members.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
   </select>
 }
 
@@ -299,7 +295,7 @@ function ManagementTab({ users, currentUserId, requests, sponsors, leads, onEdit
       <thead><tr><th>NAME</th><th>EMAIL</th><th>SUBTEAM</th><th>ACCESS TAG</th><th>ACTIONS</th></tr></thead>
       <tbody>{users.map((member) => <tr key={member.id}>
         <td>{member.displayName}</td><td>{member.email}</td><td>{member.subteam || 'Not set'}</td>
-        <td>{member.tag === 'dev' ? 'Dev' : 'Member'}</td>
+        <td>{accessTagLabel(member.tag)}</td>
         <td><div className="management-user-actions">
           <button className="button secondary management-edit-button" type="button" onClick={() => onEditUser(member)}><Pencil size={14} /> Edit</button>
           {member.id !== currentUserId && <button className="button danger-button management-edit-button" type="button" onClick={() => onDeleteUser(member)}><Trash2 size={14} /> Delete</button>}
@@ -334,16 +330,25 @@ function ManagementTab({ users, currentUserId, requests, sponsors, leads, onEdit
   </section>
 }
 
-function ManagementUserModal({ user, onClose, onSave }: {
+function accessTagLabel(tag: TeamUser['tag']) {
+  return tag === 'dev' ? 'Dev' : tag === 'stl' ? 'STL' : 'Member'
+}
+
+function ManagementUserModal({ user, onClose, onSave, onSendPasswordReset }: {
   user: TeamUser
   onClose: () => void
-  onSave: (changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) => Promise<void>
+  onSave: (changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl' }) => Promise<void>
+  onSendPasswordReset: () => Promise<void>
 }) {
   const [displayName, setDisplayName] = useState(user.displayName)
   const [email, setEmail] = useState(user.email)
   const [subteam, setSubteam] = useState(user.subteam)
+  const [tag, setTag] = useState<'member' | 'stl'>(user.tag === 'stl' ? 'stl' : 'member')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [passwordError, setPasswordError] = useState('')
+  const [passwordNotice, setPasswordNotice] = useState('')
+  const [resettingPassword, setResettingPassword] = useState(false)
   const subteams = [...subteamOptions, 'Exec']
 
   const save = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -351,10 +356,24 @@ function ManagementUserModal({ user, onClose, onSave }: {
     setSaving(true)
     setError('')
     try {
-      await onSave({ displayName, email, subteam })
+      await onSave({ displayName, email, subteam, ...(user.tag === 'dev' ? {} : { tag }) })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not update this member.')
       setSaving(false)
+    }
+  }
+
+  const sendPasswordReset = async () => {
+    setPasswordError('')
+    setPasswordNotice('')
+    setResettingPassword(true)
+    try {
+      await onSendPasswordReset()
+      setPasswordNotice(`A one-time reset link was sent to ${user.email}. It expires in 30 minutes.`)
+    } catch (caught) {
+      setPasswordError(caught instanceof Error ? caught.message : 'Could not send a password reset email.')
+    } finally {
+      setResettingPassword(false)
     }
   }
 
@@ -366,11 +385,20 @@ function ManagementUserModal({ user, onClose, onSave }: {
           <label className="field"><span>Name</span><input required minLength={2} maxLength={100} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
           <label className="field"><span>Email</span><input required type="email" maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)} /></label>
           <label className="field"><span>Subteam</span><select required value={subteam} onChange={(event) => setSubteam(event.target.value)}>{!subteams.includes(subteam) && <option value={subteam}>{subteam}</option>}{subteams.map((item) => <option key={item}>{item}</option>)}</select></label>
-          <div className="field"><span>Access tag</span><strong>{user.tag === 'dev' ? 'Dev (invite-assigned)' : 'Member'}</strong></div>
+          {user.tag === 'dev'
+            ? <div className="field"><span>Access tag</span><strong>Dev (invite-assigned)</strong></div>
+            : <label className="field"><span>Access tag</span><select value={tag} onChange={(event) => setTag(event.target.value === 'stl' ? 'stl' : 'member')}><option value="member">Member</option><option value="stl">STL</option></select></label>}
         </div>
         {error && <div className="action-error" role="alert">{error}</div>}
         <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose} disabled={saving}>Cancel</button><button type="submit" className="button primary" disabled={saving}>{saving ? 'Saving...' : 'Save member'}</button></div>
       </form>
+      <div>
+        <div className="section-heading"><div><span className="section-kicker">ACCOUNT RECOVERY</span><h3>Email a password reset link</h3></div></div>
+        <p>Send a one-time link to <strong>{user.email}</strong>. The user sets their own password; the link expires in 30 minutes.</p>
+        {passwordError && <div className="action-error" role="alert">{passwordError}</div>}
+        {passwordNotice && <div className="action-success" role="status">{passwordNotice}</div>}
+        <div className="modal-actions"><button type="button" className="button secondary" disabled={resettingPassword} onClick={() => void sendPasswordReset()}>{resettingPassword ? 'Sending email...' : 'Email password reset link'}</button></div>
+      </div>
     </section>
   </div>
 }
@@ -504,7 +532,7 @@ function App() {
       : member))
   }
 
-  const saveManagementUser = async (id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) => {
+  const saveManagementUser = async (id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl' }) => {
     try {
       const updated = await updateManagementUser(id, changes)
       setManagementUsers((current) => current.map((member) => member.id === updated.id ? updated : member))
@@ -518,6 +546,14 @@ function App() {
       setActionError(error instanceof Error ? error.message : 'Could not update this member.')
       throw error
     }
+  }
+
+  const sendManagementPasswordReset = async (id: string) => {
+    await emailManagementUserPasswordReset(id)
+  }
+
+  const finishPasswordReset = async (token: string, password: string) => {
+    await resetPassword(token, password)
   }
 
   const removeManagementUser = async (id: string) => {
@@ -774,9 +810,10 @@ function App() {
   const pageTitle = view === 'overview' ? 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : view === 'management' ? 'Management' : 'Account'
   const pageDescription = view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Requests submitted by subteams, from first ask to received.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
   if (!authReady) return <main className="auth-shell"><div className="auth-panel auth-loading"><img className="auth-logo" src="https://digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" /><p>Connecting to the team workspace...</p></div></main>
-  if (!user) return <AuthScreen onAuthenticate={authenticate} initialError={authError} />
+  if (!user) return <AuthScreen onAuthenticate={authenticate} onResetPassword={finishPasswordReset} onRequestPasswordReset={requestPasswordReset} initialError={authError} />
   const pendingSubteamRequestCount = subteamRequests.filter((request) => request.status === 'pending' && request.userId !== user.id).length
   const showSubteamRequestCount = user.tag !== 'dev' && user.subteam.trim().toLowerCase() === 'exec'
+  const canEditSharedRecords = user.tag === 'dev' || user.tag === 'stl'
 
   return (
     <div className="app-shell">
@@ -795,7 +832,7 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           <div className="workspace-status"><span className="status-dot" /> Team workspace</div>
-          <div className="workspace-user">{user.displayName} · {user.subteam || 'Subteam not set'}{user.tag === 'dev' ? ' · Dev' : ''}</div>
+          <div className="workspace-user">{user.displayName} · {user.subteam || 'Subteam not set'} · {accessTagLabel(user.tag)}</div>
           <p>Requests and sponsorship records are shared with signed-in team members.</p>
           <button className="sidebar-link" onClick={() => downloadCsv(requests, sponsors, sponsorLeads, teamMembers)}><ArrowDownToLine size={16} /> Export spreadsheet</button>
         </div>
@@ -898,9 +935,9 @@ function App() {
                 <td>{request.subteam}</td><td><span className={`priority-label ${request.priority.toLowerCase()}`}><span />{request.priority}</span></td>
                 <td><AssignmentSelect assignedId={request.assigneeId} user={user} members={teamMembers} requesterSubteam={request.requesterSubteam || request.subteam} label={`Assignment for request ${request.item}`} onChange={(assigneeId) => void updateRequestAssignee(request.id, assigneeId)} /></td>
                 <td className="compat-cell" title={request.compatibility}>{request.compatibility || 'Not provided'}</td>
-                <td><select className="inline-select" aria-label={`Communication status for ${request.item}`} value={request.communication} onChange={(event) => updateRequest(request.id, 'communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></td>
-                <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></td>
-                <td className="amount-cell">{money(request.value)}</td><td className="row-actions"><button type="button" className="icon-button row-action-button" title={`Edit ${request.item}`} aria-label={`Edit part request for ${request.item}`} onClick={() => setManagementEdit({ kind: 'request', record: request })}><Pencil size={15} /></button><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></td>
+                <td><select className="inline-select" aria-label={`Communication status for ${request.item}`} value={request.communication} disabled={!canEditSharedRecords} onChange={(event) => updateRequest(request.id, 'communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></td>
+                <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} disabled={!canEditSharedRecords} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></td>
+                <td className="amount-cell">{money(request.value)}</td><td className="row-actions">{canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${request.item}`} aria-label={`Edit part request for ${request.item}`} onClick={() => setManagementEdit({ kind: 'request', record: request })}><Pencil size={15} /></button><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></>}</td>
               </tr>)}
               {filteredRequests.length === 0 && <tr><td colSpan={9} className="empty-table">No requests match this search.</td></tr>}
             </tbody></table></div>
@@ -912,9 +949,9 @@ function App() {
             <div className="table-scroll"><table><thead><tr><th>COMPANY / ENTITY</th><th>CONTACT</th><th>AMOUNT</th><th>STATUS</th><th>DELIVERABLES</th><th>RELATIONSHIP</th><th>RENEWAL</th><th>ACTIONS</th></tr></thead><tbody>
               {filteredSponsors.map((sponsor) => <tr key={sponsor.id}>
                 <td><button type="button" className="sponsor-detail-trigger" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-detail') }}><span className="table-title">{sponsor.company}</span><span className="table-subtitle"><Eye size={12} /> View full sponsorship</span></button></td><td>{sponsor.contact || 'Not provided'}</td><td className="amount-cell">{money(sponsor.amount)}</td>
-                <td><select className="inline-select" aria-label={`Sponsorship status for ${sponsor.company}`} value={sponsor.status} onChange={(event) => updateSponsorStatus(sponsor.id, event.target.value as SponsorStatus)}><option>Prospect</option><option>Proposal sent</option><option>Committed</option><option>Received</option></select></td>
+                <td><select className="inline-select" aria-label={`Sponsorship status for ${sponsor.company}`} value={sponsor.status} disabled={!canEditSharedRecords} onChange={(event) => updateSponsorStatus(sponsor.id, event.target.value as SponsorStatus)}><option>Prospect</option><option>Proposal sent</option><option>Committed</option><option>Received</option></select></td>
                 <td><button type="button" className="sponsor-deliverables-trigger" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-detail') }}>{sponsor.deliverables.length ? `${sponsor.deliverables.length} agreed` : 'View details'}</button></td><td>{sponsor.relationship}</td><td>{sponsor.renewal || 'Not set'}</td>
-                <td><button type="button" className="button secondary sponsor-row-edit" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-edit') }} aria-label={`Edit sponsorship details for ${sponsor.company}`}><Pencil size={14} /> Edit</button></td>
+                <td>{canEditSharedRecords && <button type="button" className="button secondary sponsor-row-edit" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-edit') }} aria-label={`Edit sponsorship details for ${sponsor.company}`}><Pencil size={14} /> Edit</button>}</td>
               </tr>)}
               {filteredSponsors.length === 0 && <tr><td colSpan={8} className="empty-table">No sponsors match this search.</td></tr>}
             </tbody></table></div>
@@ -936,9 +973,9 @@ function App() {
                 </button>
                 <div className="lead-summary-tools">
                   <AssignmentSelect assignedId={lead.assigneeId} user={user} members={teamMembers} requesterSubteam={lead.requesterSubteam || lead.subteam} label={`Assignment for sponsor lead ${lead.company}`} onChange={(assigneeId) => void updateSponsorLeadAssignee(lead.id, assigneeId)} />
-                  <select className="inline-select lead-status-select" aria-label={`Follow-up status for ${lead.company}`} value={lead.status} onChange={(event) => void updateSponsorLeadStatus(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select>
-                  <button type="button" className="icon-button row-action-button" title={`Edit ${lead.company}`} aria-label={`Edit sponsor lead for ${lead.company}`} onClick={() => setManagementEdit({ kind: 'lead', record: lead })}><Pencil size={15} /></button>
-                  <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button>
+                  <select className="inline-select lead-status-select" aria-label={`Follow-up status for ${lead.company}`} value={lead.status} disabled={!canEditSharedRecords} onChange={(event) => void updateSponsorLeadStatus(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select>
+                  {canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${lead.company}`} aria-label={`Edit sponsor lead for ${lead.company}`} onClick={() => setManagementEdit({ kind: 'lead', record: lead })}><Pencil size={15} /></button>
+                  <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button></>}
                 </div>
               </article>)}
               {filteredSponsorLeads.length === 0 && <div className="empty-state lead-empty-state">No sponsor leads yet. Submit a business connection for follow-up.</div>}
@@ -953,15 +990,16 @@ function App() {
       {modal === 'request' && <RequestModal onClose={() => setModal(null)} onSave={addRequest} />}
       {sponsorModal === 'sponsor' && <SponsorModal onClose={() => setSponsorModal(null)} onSave={addSponsor} />}
       {sponsorModal === 'sponsor-edit' && selectedSponsor && <SponsorModal sponsor={selectedSponsor} onClose={() => setSponsorModal('sponsor-detail')} onSave={(input) => editSponsor(selectedSponsor.id, input)} />}
-      {sponsorModal === 'sponsor-detail' && selectedSponsor && <SponsorDetailsModal sponsor={selectedSponsor} onClose={() => setSponsorModal(null)} onEdit={() => setSponsorModal('sponsor-edit')} onDelete={() => void deleteSponsor(selectedSponsor)} onDeliverableStatusChange={updateDeliverableStatus} />}
+      {sponsorModal === 'sponsor-detail' && selectedSponsor && <SponsorDetailsModal sponsor={selectedSponsor} canEdit={canEditSharedRecords} onClose={() => setSponsorModal(null)} onEdit={() => setSponsorModal('sponsor-edit')} onDelete={() => void deleteSponsor(selectedSponsor)} onDeliverableStatusChange={updateDeliverableStatus} />}
       {modal === 'lead' && <SponsorLeadModal onClose={() => setModal(null)} onSave={addSponsorLead} />}
-      {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} onClose={() => setModal(null)} onStatusChange={updateSponsorLeadStatus} />}
+      {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} canEdit={canEditSharedRecords} onClose={() => setModal(null)} onStatusChange={updateSponsorLeadStatus} />}
       {modal === 'part-detail' && selectedRequest && <PartRequestDetailsModal request={selectedRequest} assignee={teamMembers.find((member) => member.id === selectedRequest.assigneeId)} onClose={() => setModal(null)} />}
       {managementEdit?.kind === 'user' && <ManagementUserModal
         key={managementEdit.user.id}
         user={managementEdit.user}
         onClose={() => setManagementEdit(null)}
         onSave={(changes) => saveManagementUser(managementEdit.user.id, changes)}
+        onSendPasswordReset={() => sendManagementPasswordReset(managementEdit.user.id)}
       />}
       {managementEdit?.kind === 'request' && <RequestModal
         key={managementEdit.record.id}
@@ -1063,17 +1101,17 @@ function SponsorModal({ sponsor, onClose, onSave }: { sponsor?: Sponsor; onClose
   </section></div>
 }
 
-function SponsorDetailsModal({ sponsor, onClose, onEdit, onDelete, onDeliverableStatusChange }: { sponsor: Sponsor; onClose: () => void; onEdit: () => void; onDelete: () => void; onDeliverableStatusChange: (sponsor: Sponsor, index: number, status: DeliverableStatus) => Promise<void> }) {
+function SponsorDetailsModal({ sponsor, canEdit, onClose, onEdit, onDelete, onDeliverableStatusChange }: { sponsor: Sponsor; canEdit: boolean; onClose: () => void; onEdit: () => void; onDelete: () => void; onDeliverableStatusChange: (sponsor: Sponsor, index: number, status: DeliverableStatus) => Promise<void> }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="sponsor-details-title">
     <div className="modal-heading"><div><span className="section-kicker">FULL SPONSORSHIP RECORD</span><h2 id="sponsor-details-title">{sponsor.company}</h2><p>Added by {sponsor.createdBy} · {sponsor.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
     <div className="lead-details-content">
       <section className="lead-details-section"><h3>Agreement</h3><p>{sponsor.status} · {money(sponsor.amount)}</p></section>
       <section className="lead-details-section"><h3>Contact</h3><p>{sponsor.contact || 'No contact provided'}</p></section>
-      <section className="lead-details-section"><h3>Agreed deliverables ({sponsor.deliverables.length})</h3>{sponsor.deliverables.length ? <ul className="sponsor-deliverables-list">{sponsor.deliverables.map((deliverable, index) => <li key={`${deliverable.description}-${index}`}><span>{deliverable.description}</span><select className="inline-select deliverable-status-select" aria-label={`Tracking status for ${deliverable.description}`} value={deliverable.status} onChange={(event) => void onDeliverableStatusChange(sponsor, index, event.target.value as DeliverableStatus)}><option>Not started</option><option>In progress</option><option>Completed</option></select></li>)}</ul> : <p>No deliverables listed.</p>}</section>
+      <section className="lead-details-section"><h3>Agreed deliverables ({sponsor.deliverables.length})</h3>{sponsor.deliverables.length ? <ul className="sponsor-deliverables-list">{sponsor.deliverables.map((deliverable, index) => <li key={`${deliverable.description}-${index}`}><span>{deliverable.description}</span><select className="inline-select deliverable-status-select" aria-label={`Tracking status for ${deliverable.description}`} value={deliverable.status} disabled={!canEdit} onChange={(event) => void onDeliverableStatusChange(sponsor, index, event.target.value as DeliverableStatus)}><option>Not started</option><option>In progress</option><option>Completed</option></select></li>)}</ul> : <p>No deliverables listed.</p>}</section>
       <section className="lead-details-section"><h3>Relationship</h3><p>{sponsor.relationship || 'No relationship details provided.'}</p></section>
       <section className="lead-details-section"><h3>Renewal / follow-up</h3><p>{sponsor.renewal || 'Not set'}</p></section>
     </div>
-    <div className="modal-actions sponsor-detail-actions"><button type="button" className="button secondary delete-sponsor-button" onClick={onDelete}><Trash2 size={15} /> Delete sponsorship</button><button type="button" className="button secondary" onClick={onClose}>Close</button><button type="button" className="button primary" onClick={onEdit}>Edit sponsorship</button></div>
+    <div className="modal-actions sponsor-detail-actions">{canEdit && <button type="button" className="button secondary delete-sponsor-button" onClick={onDelete}><Trash2 size={15} /> Delete sponsorship</button>}<button type="button" className="button secondary" onClick={onClose}>Close</button>{canEdit && <button type="button" className="button primary" onClick={onEdit}>Edit sponsorship</button>}</div>
   </section></div>
 }
 
@@ -1128,7 +1166,7 @@ function SponsorLeadModal({ lead, onClose, onSave }: { lead?: SponsorLead; onClo
   </section></div>
 }
 
-function SponsorLeadDetailsModal({ lead, onClose, onStatusChange }: { lead: SponsorLead; onClose: () => void; onStatusChange: (id: string, status: SponsorLeadStatus) => Promise<void> }) {
+function SponsorLeadDetailsModal({ lead, canEdit, onClose, onStatusChange }: { lead: SponsorLead; canEdit: boolean; onClose: () => void; onStatusChange: (id: string, status: SponsorLeadStatus) => Promise<void> }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="lead-details-title">
     <div className="modal-heading"><div><span className="section-kicker">SPONSOR LEAD · SUBMITTED BY {lead.createdBy.toUpperCase()}</span><h2 id="lead-details-title">{lead.company}</h2><p>{lead.subteam || 'Team connection'} · Submitted {lead.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close lead details"><X size={19} /></button></div>
     <div className="lead-details-content">
@@ -1136,7 +1174,7 @@ function SponsorLeadDetailsModal({ lead, onClose, onStatusChange }: { lead: Spon
       <section className="lead-details-section"><h3>Contact</h3><p>{lead.contactName || 'No named contact'}{lead.contactRole ? ` · ${lead.contactRole}` : ''}</p><div className="lead-contact-links">{lead.contactEmail && <a href={`mailto:${lead.contactEmail}`}>{lead.contactEmail}</a>}{lead.contactPhone && <a href={`tel:${lead.contactPhone}`}>{lead.contactPhone}</a>}</div></section>
       <section className="lead-details-section"><h3>Connection</h3><p>{lead.relationship}</p><div className="lead-detail-cash">Can introduce: <strong>{lead.canIntroduce}</strong></div></section>
       <section className="lead-details-section"><h3>Why they might support the team</h3><p>{lead.details}</p></section>
-      <label className="lead-detail-status"><span>Business team follow-up</span><select className="inline-select" value={lead.status} onChange={(event) => void onStatusChange(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select></label>
+      <label className="lead-detail-status"><span>Business team follow-up</span><select className="inline-select" value={lead.status} disabled={!canEdit} onChange={(event) => void onStatusChange(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select></label>
     </div>
     <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Close</button></div>
   </section></div>

@@ -21,7 +21,7 @@ export type TeamUser = {
   email: string
   displayName: string
   subteam: string
-  tag: 'member' | 'dev'
+  tag: 'member' | 'dev' | 'stl'
 }
 
 export type TeamMember = {
@@ -171,7 +171,7 @@ export async function getManagementUsers() {
   return result.users
 }
 
-export async function updateManagementUser(id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'>) {
+export async function updateManagementUser(id: string, changes: Pick<TeamUser, 'displayName' | 'email' | 'subteam'> & { tag?: 'member' | 'stl' }) {
   const result = await request<{ user: TeamUser }>(`/api/management/users/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(changes),
@@ -181,6 +181,26 @@ export async function updateManagementUser(id: string, changes: Pick<TeamUser, '
 
 export async function deleteManagementUser(id: string) {
   await request<void>(`/api/management/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function emailManagementUserPasswordReset(id: string) {
+  await request<void>(`/api/management/users/${encodeURIComponent(id)}/password-reset`, {
+    method: 'POST',
+  })
+}
+
+export async function resetPassword(token: string, password: string) {
+  await request<void>('/api/auth/password-reset', {
+    method: 'POST',
+    body: JSON.stringify({ token, password }),
+  })
+}
+
+export async function requestPasswordReset(email: string) {
+  await request<{ message: string }>('/api/auth/password-reset/request', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
 }
 
 export async function updateManagementRequest(id: string, changes: Partial<PartRequestInput>) {

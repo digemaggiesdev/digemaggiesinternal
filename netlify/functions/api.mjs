@@ -1,6 +1,7 @@
 import { getDatabase } from '@netlify/database'
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
+import { createPasswordResetUrl, sendPasswordResetEmail } from '../../server/email.js'
 import {
   accountDeleteSchema,
   accountPatchSchema,
@@ -17,10 +18,13 @@ import {
   subteamChangeReviewSchema,
   sponsorshipPatchSchema,
   sponsorshipSchema,
+  passwordResetRequestSchema,
+  passwordResetSchema,
 } from '../../server/validation.js'
 
 const scrypt = promisify(scryptCallback)
 const sessionLifetime = 7 * 24 * 60 * 60 * 1000
+const passwordResetLifetime = 30 * 60 * 1000
 const authWindow = 15 * 60 * 1000
 const authAttemptLimit = 20
 const cookieName = 'digem_session'
@@ -191,6 +195,10 @@ function isDev(user) {
   return user.tag === 'dev'
 }
 
+function canEditSharedRecords(user) {
+  return isDev(user) || user.tag === 'stl'
+}
+
 function canReviewSubteamChanges(user) {
   return isDev(user) || canDelegate(user)
 }
@@ -200,6 +208,12 @@ async function isEligibleAssignee(database, assigneeId, requesterSubteam) {
   const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId}`
   const allowedSubteams = new Set(['business', requesterSubteam.trim().toLowerCase()])
   return Boolean(member && allowedSubteams.has(member.subteam.trim().toLowerCase()))
+}
+
+async function isInSubteam(database, assigneeId, subteam) {
+  if (!assigneeId) return true
+  const [member] = await database.sql`SELECT subteam FROM users WHERE id = ${assigneeId}`
+  return Boolean(member && member.subteam.trim().toLowerCase() === subteam.trim().toLowerCase())
 }
 
 async function assigneeAuthorizationError(database, user, assigneeId, requesterSubteam, currentAssigneeId) {
@@ -213,6 +227,11 @@ async function assigneeAuthorizationError(database, user, assigneeId, requesterS
     return await isEligibleAssignee(database, assigneeId, requesterSubteam)
       ? null
       : { error: 'Choose a member from the Business subteam or the requester’s subteam.', status: 400 }
+  }
+  if (user.tag === 'stl') {
+    return await isInSubteam(database, assigneeId, user.subteam)
+      ? null
+      : { error: 'Choose a member from your subteam.', status: 400 }
   }
   if (assigneeId === user.id) {
     return await isEligibleAssignee(database, user.id, requesterSubteam)
@@ -307,6 +326,77 @@ export function createApiHandler(database, environment = process.env) {
         return Response.json({ user: publicUser(user) }, { headers: { 'Set-Cookie': setSessionCookie(request, token) } })
       }
 
+      if (method === 'POST' && pathname === '/api/auth/password-reset') {
+        if (!(await consumeAuthAttempt(database, request, pathname))) {
+          return jsonError('Too many password reset attempts. Try again later.', 429)
+        }
+        const parsed = await parseBody(request, passwordResetSchema)
+        if (parsed.response) return parsed.response
+        const hashedToken = sha256(parsed.data.token)
+        const hashedPassword = await passwordHash(parsed.data.password)
+        const client = await database.pool.connect()
+        let didReset = false
+        try {
+          await client.query('BEGIN')
+          const reset = await client.query(
+            'SELECT user_id FROM password_reset_tokens WHERE token_hash = $1 AND expires_at > $2 FOR UPDATE',
+            [hashedToken, Date.now()],
+          )
+          if (reset.rowCount) {
+            const userId = reset.rows[0].user_id
+            await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hashedPassword, userId])
+            await client.query('DELETE FROM sessions WHERE user_id = $1', [userId])
+            await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId])
+            didReset = true
+          }
+          await client.query('COMMIT')
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+        return didReset
+          ? new Response(null, { status: 204 })
+          : jsonError('This password reset link is invalid or has expired.', 400)
+      }
+
+      if (method === 'POST' && pathname === '/api/auth/password-reset/request') {
+        if (!(await consumeAuthAttempt(database, request, pathname))) {
+          return jsonError('Too many password reset attempts. Try again later.', 429)
+        }
+        const parsed = await parseBody(request, passwordResetRequestSchema)
+        if (parsed.response) return parsed.response
+        const [target] = await database.sql`
+          SELECT id, email, display_name FROM users WHERE email = ${parsed.data.email}
+        `
+        if (target) {
+          const token = randomBytes(32).toString('base64url')
+          const hashedToken = sha256(token)
+          const expiresAt = Date.now() + passwordResetLifetime
+          await database.sql`DELETE FROM password_reset_tokens WHERE user_id = ${target.id}`
+          await database.sql`
+            INSERT INTO password_reset_tokens (token_hash, user_id, expires_at)
+            VALUES (${hashedToken}, ${target.id}, ${expiresAt})
+          `
+          try {
+            const appUrl = environment.APP_URL || new URL(request.url).origin
+            await sendPasswordResetEmail({
+              email: target.email,
+              displayName: target.display_name,
+              resetUrl: createPasswordResetUrl(token, appUrl),
+              environment,
+            })
+          } catch (error) {
+            console.error('Could not send password reset email:', error)
+            await database.sql`DELETE FROM password_reset_tokens WHERE token_hash = ${hashedToken}`
+          }
+        }
+        return Response.json({
+          message: 'If an account exists for that email, a password reset link has been sent.',
+        }, { status: 202 })
+      }
+
       const session = await findSession(database, request)
       if (!session) return jsonError('Sign in to continue.', 401)
 
@@ -328,6 +418,54 @@ export function createApiHandler(database, environment = process.env) {
       }
 
       const managedUserId = getRouteId(pathname, '/api/management/users/')
+      if (method === 'POST' && pathname.endsWith('/password-reset')) {
+        const resetUserId = getRouteId(pathname.slice(0, -'/password-reset'.length), '/api/management/users/')
+        if (!resetUserId) return jsonError('Team member not found.', 404)
+        if (!(await consumeAuthAttempt(database, request, '/api/management/password-reset'))) {
+          return jsonError('Too many password reset attempts. Try again later.', 429)
+        }
+        const client = await database.pool.connect()
+        const token = randomBytes(32).toString('base64url')
+        const hashedToken = sha256(token)
+        const expiresAt = Date.now() + passwordResetLifetime
+        let target
+        try {
+          await client.query('BEGIN')
+          const found = await client.query('SELECT email, display_name FROM users WHERE id = $1 FOR UPDATE', [resetUserId])
+          if (!found.rowCount) {
+            await client.query('ROLLBACK')
+            return jsonError('Team member not found.', 404)
+          }
+          target = found.rows[0]
+          await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [resetUserId])
+          await client.query(
+            'INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES ($1, $2, $3)',
+            [hashedToken, resetUserId, expiresAt],
+          )
+          await client.query('COMMIT')
+        } catch (error) {
+          await client.query('ROLLBACK')
+          throw error
+        } finally {
+          client.release()
+        }
+
+        try {
+          const appUrl = environment.APP_URL || new URL(request.url).origin
+          const resetUrl = createPasswordResetUrl(token, appUrl)
+          await sendPasswordResetEmail({
+            email: target.email,
+            displayName: target.display_name,
+            resetUrl,
+            environment,
+          })
+          return new Response(null, { status: 204 })
+        } catch (error) {
+          console.error('Could not send password reset email:', error)
+          await database.sql`DELETE FROM password_reset_tokens WHERE token_hash = ${hashedToken}`
+          return jsonError('Could not send the password reset email. Check email settings and try again.', 502)
+        }
+      }
       if (managedUserId && method === 'DELETE') {
         if (managedUserId === session.user.id) return jsonError('You cannot delete your own account from management.', 403)
         const client = await database.pool.connect()
@@ -356,7 +494,8 @@ export function createApiHandler(database, environment = process.env) {
         try {
           const [updated] = await database.sql`
             UPDATE users
-            SET display_name = ${parsed.data.displayName}, email = ${parsed.data.email}, subteam = ${parsed.data.subteam}
+            SET display_name = ${parsed.data.displayName}, email = ${parsed.data.email},
+              subteam = ${parsed.data.subteam}, tag = COALESCE(${parsed.data.tag ?? null}, tag)
             WHERE id = ${managedUserId}
             RETURNING id, email, display_name, subteam, tag
           `
@@ -603,6 +742,7 @@ export function createApiHandler(database, environment = process.env) {
 
       const requestId = getRouteId(pathname, '/api/requests/')
       if (requestId && method === 'PATCH') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to edit shared records.', 403)
         const parsed = await parseBody(request, partRequestPatchSchema)
         if (parsed.response) return parsed.response
         if (Object.hasOwn(parsed.data, 'assigneeId')) {
@@ -616,6 +756,7 @@ export function createApiHandler(database, environment = process.env) {
         return record ? Response.json({ record }) : jsonError('Part request not found.', 404)
       }
       if (requestId && method === 'DELETE') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to delete shared records.', 403)
         const deleted = await database.sql`DELETE FROM records WHERE id = ${requestId} AND kind = 'part_request' RETURNING id`
         return deleted.length ? new Response(null, { status: 204 }) : jsonError('Part request not found.', 404)
       }
@@ -632,12 +773,14 @@ export function createApiHandler(database, environment = process.env) {
 
       const sponsorshipId = getRouteId(pathname, '/api/sponsorships/')
       if (sponsorshipId && method === 'PATCH') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to edit shared records.', 403)
         const parsed = await parseBody(request, sponsorshipPatchSchema)
         if (parsed.response) return parsed.response
         const record = await updateRecord(database, 'sponsorship', sponsorshipId, parsed.data)
         return record ? Response.json({ record }) : jsonError('Sponsorship not found.', 404)
       }
       if (sponsorshipId && method === 'DELETE') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to delete shared records.', 403)
         const deleted = await database.sql`DELETE FROM records WHERE id = ${sponsorshipId} AND kind = 'sponsorship' RETURNING id`
         return deleted.length ? new Response(null, { status: 204 }) : jsonError('Sponsorship not found.', 404)
       }
@@ -658,6 +801,7 @@ export function createApiHandler(database, environment = process.env) {
 
       const sponsorLeadId = getRouteId(pathname, '/api/sponsor-leads/')
       if (sponsorLeadId && method === 'PATCH') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to edit shared records.', 403)
         const parsed = await parseBody(request, sponsorLeadPatchSchema)
         if (parsed.response) return parsed.response
         if (Object.hasOwn(parsed.data, 'assigneeId')) {
@@ -671,6 +815,7 @@ export function createApiHandler(database, environment = process.env) {
         return record ? Response.json({ record }) : jsonError('Sponsor lead not found.', 404)
       }
       if (sponsorLeadId && method === 'DELETE') {
+        if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to delete shared records.', 403)
         const deleted = await database.sql`DELETE FROM sponsor_leads WHERE id = ${sponsorLeadId} RETURNING id`
         return deleted.length ? new Response(null, { status: 204 }) : jsonError('Sponsor lead not found.', 404)
       }

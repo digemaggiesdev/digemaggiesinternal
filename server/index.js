@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSa
 import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 import { db } from './db.js'
+import { createPasswordResetUrl, sendPasswordResetEmail } from './email.js'
 import {
   accountDeleteSchema,
   accountPatchSchema,
@@ -21,14 +22,17 @@ import {
   subteamChangeReviewSchema,
   sponsorshipPatchSchema,
   sponsorshipSchema,
+  passwordResetRequestSchema,
+  passwordResetSchema,
 } from './validation.js'
 
 const scrypt = promisify(scryptCallback)
 const app = express()
 const sessionLifetime = 7 * 24 * 60 * 60 * 1000
+const passwordResetLifetime = 30 * 60 * 1000
 const isProduction = process.env.NODE_ENV === 'production'
-const inviteCode = process.env.TEAM_INVITE_CODE || (isProduction ? '' : 'digem-dev-invite')
-const devInviteCode = process.env.DEV_INVITE_CODE || ''
+const inviteCode = process.env.TEAM_INVITE_CODE || (isProduction ? '' : 'local-team-code')
+const devInviteCode = process.env.DEV_INVITE_CODE || (isProduction ? '' : 'local-dev-code')
 
 if (isProduction && !inviteCode) {
   throw new Error('TEAM_INVITE_CODE must be configured in production.')
@@ -46,6 +50,13 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many sign-in attempts. Try again in a few minutes.' },
+})
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many password reset attempts. Try again later.' },
 })
 
 function publicUser(user) {
@@ -178,6 +189,10 @@ function isDev(user) {
   return user.tag === 'dev'
 }
 
+function canEditSharedRecords(user) {
+  return isDev(user) || user.tag === 'stl'
+}
+
 function canReviewSubteamChanges(user) {
   return isDev(user) || canDelegate(user)
 }
@@ -193,6 +208,16 @@ function validateAssignee(res, assigneeId, requesterSubteam) {
   return true
 }
 
+function validateAssigneeSubteam(res, assigneeId, subteam) {
+  if (!assigneeId) return true
+  const assignee = db.prepare('SELECT subteam FROM users WHERE id = ?').get(assigneeId)
+  if (!assignee || assignee.subteam.trim().toLowerCase() !== subteam.trim().toLowerCase()) {
+    res.status(400).json({ error: 'Choose a member from your subteam.' })
+    return false
+  }
+  return true
+}
+
 function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssigneeId) {
   if (isDev(user)) {
     if (!assigneeId || db.prepare('SELECT id FROM users WHERE id = ?').get(assigneeId)) return true
@@ -203,6 +228,7 @@ function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssig
     if (assigneeId === user.id) return true
     return validateAssignee(res, assigneeId, requesterSubteam)
   }
+  if (user.tag === 'stl') return validateAssigneeSubteam(res, assigneeId, user.subteam)
   const subteam = user.subteam.trim().toLowerCase()
   if (assigneeId === user.id && (subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase())) return true
   if (!assigneeId && currentAssigneeId === user.id) return true
@@ -246,6 +272,61 @@ app.post('/api/auth/login', authLimiter, async (req, res, next) => {
     }
     issueSession(res, user.id)
     res.json({ user: publicUser(user) })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.post('/api/auth/password-reset', passwordResetLimiter, async (req, res, next) => {
+  const input = parseBody(passwordResetSchema, req, res)
+  if (!input) return
+  try {
+    const now = Date.now()
+    const tokenHashValue = tokenHash(input.token)
+    const passwordHashValue = await passwordHash(input.password)
+    const resetPassword = db.transaction(() => {
+      const reset = db.prepare('SELECT user_id FROM password_reset_tokens WHERE token_hash = ? AND expires_at > ?')
+        .get(tokenHashValue, now)
+      if (!reset) return false
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHashValue, reset.user_id)
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(reset.user_id)
+      db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').run(reset.user_id)
+      return true
+    })
+    if (!resetPassword()) return res.status(400).json({ error: 'This password reset link is invalid or has expired.' })
+    res.status(204).end()
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.post('/api/auth/password-reset/request', passwordResetLimiter, async (req, res, next) => {
+  const input = parseBody(passwordResetRequestSchema, req, res)
+  if (!input) return
+  try {
+    const target = db.prepare('SELECT id, email, display_name FROM users WHERE email = ? COLLATE NOCASE').get(input.email)
+    if (target) {
+      const token = randomBytes(32).toString('base64url')
+      const hashedToken = tokenHash(token)
+      const expiresAt = Date.now() + passwordResetLifetime
+      db.transaction(() => {
+        db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').run(target.id)
+        db.prepare('INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
+          .run(hashedToken, target.id, expiresAt)
+      })()
+      try {
+        const appUrl = process.env.APP_URL || req.get('origin') || `${req.protocol}://${req.get('host')}`
+        await sendPasswordResetEmail({
+          email: target.email,
+          displayName: target.display_name,
+          resetUrl: createPasswordResetUrl(token, appUrl),
+        })
+      } catch (error) {
+        console.error('Could not send password reset email:', error)
+        db.prepare('DELETE FROM password_reset_tokens WHERE token_hash = ?').run(hashedToken)
+      }
+    }
+    res.status(202).json({ message: 'If an account exists for that email, a password reset link has been sent.' })
   } catch (error) {
     next(error)
   }
@@ -404,14 +485,41 @@ app.patch('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
   const input = parseBody(managementUserPatchSchema, req, res)
   if (!input) return
   try {
-    const result = db.prepare('UPDATE users SET display_name = ?, email = ?, subteam = ? WHERE id = ?')
-      .run(input.displayName, input.email, input.subteam, req.params.id)
+    const result = db.prepare('UPDATE users SET display_name = ?, email = ?, subteam = ?, tag = COALESCE(?, tag) WHERE id = ?')
+      .run(input.displayName, input.email, input.subteam, input.tag ?? null, req.params.id)
     if (!result.changes) return res.status(404).json({ error: 'Team member not found.' })
     const updated = db.prepare('SELECT id, email, display_name, subteam, tag FROM users WHERE id = ?').get(req.params.id)
     res.json({ user: publicUser(updated) })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
     throw error
+  }
+})
+
+app.post('/api/management/users/:id/password-reset', requireAuth, requireDev, passwordResetLimiter, async (req, res) => {
+  const target = db.prepare('SELECT email, display_name FROM users WHERE id = ?').get(req.params.id)
+  if (!target) return res.status(404).json({ error: 'Team member not found.' })
+  const token = randomBytes(32).toString('base64url')
+  const hashedToken = tokenHash(token)
+  const expiresAt = Date.now() + passwordResetLifetime
+  db.transaction(() => {
+    db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').run(req.params.id)
+    db.prepare('INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
+      .run(hashedToken, req.params.id, expiresAt)
+  })()
+  try {
+    const appUrl = process.env.APP_URL || req.get('origin') || `${req.protocol}://${req.get('host')}`
+    const resetUrl = createPasswordResetUrl(token, appUrl)
+    await sendPasswordResetEmail({
+      email: target.email,
+      displayName: target.display_name,
+      resetUrl,
+    })
+    res.status(204).end()
+  } catch (error) {
+    console.error('Could not send password reset email:', error)
+    db.prepare('DELETE FROM password_reset_tokens WHERE token_hash = ?').run(hashedToken)
+    res.status(502).json({ error: 'Could not send the password reset email. Check email settings and try again.' })
   }
 })
 
@@ -468,6 +576,7 @@ app.post('/api/requests', requireAuth, (req, res) => {
   res.status(201).json({ record })
 })
 app.patch('/api/requests/:id', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to edit shared records.' })
   const input = parseBody(partRequestPatchSchema, req, res)
   if (!input) return
   if (Object.hasOwn(input, 'assigneeId')) {
@@ -481,6 +590,7 @@ app.patch('/api/requests/:id', requireAuth, (req, res) => {
   res.json({ record })
 })
 app.delete('/api/requests/:id', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
   const result = db.prepare('DELETE FROM records WHERE id = ? AND kind = ?').run(req.params.id, 'part_request')
   if (!result.changes) return res.status(404).json({ error: 'Part request not found.' })
   res.status(204).end()
@@ -494,6 +604,7 @@ app.post('/api/sponsorships', requireAuth, (req, res) => {
   res.status(201).json({ record })
 })
 app.patch('/api/sponsorships/:id', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to edit shared records.' })
   const input = parseBody(sponsorshipPatchSchema, req, res)
   if (!input) return
   const record = updateRecord('sponsorship', req.params.id, input)
@@ -501,6 +612,7 @@ app.patch('/api/sponsorships/:id', requireAuth, (req, res) => {
   res.json({ record })
 })
 app.delete('/api/sponsorships/:id', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
   const result = db.prepare('DELETE FROM records WHERE id = ? AND kind = ?').run(req.params.id, 'sponsorship')
   if (!result.changes) return res.status(404).json({ error: 'Sponsorship not found.' })
   res.status(204).end()
@@ -514,6 +626,7 @@ app.post('/api/sponsor-leads', requireAuth, (req, res) => {
   res.status(201).json({ record })
 })
 app.patch('/api/sponsor-leads/:id', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to edit shared records.' })
   const input = parseBody(sponsorLeadPatchSchema, req, res)
   if (!input) return
   if (Object.hasOwn(input, 'assigneeId')) {
@@ -527,6 +640,7 @@ app.patch('/api/sponsor-leads/:id', requireAuth, (req, res) => {
   res.json({ record })
 })
 app.delete('/api/sponsor-leads/:id', requireAuth, (req, res) => {
+  if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
   const result = db.prepare('DELETE FROM sponsor_leads WHERE id = ?').run(req.params.id)
   if (!result.changes) return res.status(404).json({ error: 'Sponsor lead not found.' })
   res.status(204).end()

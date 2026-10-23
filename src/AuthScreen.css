@@ -7,7 +7,8 @@
 .auth-panel form { display: grid; gap: 14px; }
 .auth-submit { width: 100%; min-height: 43px; justify-content: space-between; margin-top: 3px; padding-inline: 14px; }
 .auth-error { border-left: 3px solid #a33a2d; padding: 9px 11px; color: #7b241b; background: #fbefeb; font-size: 11px; line-height: 1.45; }
-.auth-switch { display: flex; justify-content: center; gap: 5px; margin-top: 18px; color: #776d66; font-size: 11px; }
+.auth-notice { border-left: 3px solid #39804e; padding: 9px 11px; color: #245a34; background: #edf7ef; font-size: 11px; line-height: 1.45; }
+.auth-switch { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; margin-top: 18px; color: #776d66; font-size: 11px; }
 .auth-switch button { border: 0; padding: 0; color: #690d0d; background: transparent; font: 700 11px var(--body); cursor: pointer; }
 .auth-footnote { border-top: 1px solid #eee8e0; margin-top: 19px; padding-top: 14px; color: #93857a; text-align: center; font-size: 9px; }
 

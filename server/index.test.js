@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const directory = await mkdtemp(join(tmpdir(), 'digem-api-test-'))
+const directory = await mkdtemp(join(tmpdir(), 'Digem-api-test-'))
 const databasePath = join(directory, 'test.sqlite')
 const port = await getFreePort()
 const sentEmails = []
@@ -35,7 +35,7 @@ const server = spawn(process.execPath, [serverPath], {
     TEAM_INVITE_CODE: '',
     DEV_INVITE_CODE: '',
     RESEND_API_KEY: 'test-resend-key',
-    RESEND_FROM: 'DiGem Test <test@example.com>',
+    RESEND_FROM: 'Digem Test <test@example.com>',
     RESEND_API_URL: `http://127.0.0.1:${emailPort}`,
     APP_URL: 'http://localhost:5173',
   },

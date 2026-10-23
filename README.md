@@ -7,6 +7,7 @@ A team workspace for part requests and sponsor relationships. Local development 
 Requires Node.js 22 or later.
 
 ```sh
+cp .env.example .env
 npm install
 npm run dev
 ```
@@ -41,5 +42,5 @@ Production sign-in, part requests, sponsor leads, and sponsorship records are ha
 - Sponsor leads can include multiple support types: financial contributions, parts and materials, equipment, services or expertise, and other offers. The cash estimate is optional.
 - CSV export opens in Excel or Google Sheets, but it is a snapshot rather than live spreadsheet synchronization.
 - Existing data in the local SQLite database is not automatically migrated into Netlify Database; export or migrate it before cutover if it needs to be kept.
-- The initial deployment starts with empty shared tables; add team records after creating the first account.# digemaggiesinternal
-# digemaggiesinternal
+- The initial deployment starts with empty shared tables; add team records after creating the first account.# Digemaggiesinternal
+# Digemaggiesinternal

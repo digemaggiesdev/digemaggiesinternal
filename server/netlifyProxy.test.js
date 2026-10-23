@@ -35,9 +35,9 @@ before(async () => {
     TEAM_INVITE_CODE: inviteCode,
     DEV_INVITE_CODE: devInviteCode,
     RESEND_API_KEY: 'test-resend-key',
-    RESEND_FROM: 'DiGem Test <test@example.com>',
+    RESEND_FROM: 'Digem Test <test@example.com>',
     RESEND_API_URL: `http://127.0.0.1:${emailPort}`,
-    APP_URL: 'https://digem.example.netlify.app',
+    APP_URL: 'https://Digem.example.netlify.app',
   })
 })
 
@@ -51,7 +51,7 @@ function jsonRequest(path, { method = 'GET', body, cookie } = {}) {
   const headers = { 'x-nf-client-connection-ip': '127.0.0.1' }
   if (body !== undefined) headers['content-type'] = 'application/json'
   if (cookie) headers.cookie = cookie
-  return new Request(`https://digem.example.netlify.app${path}`, {
+  return new Request(`https://Digem.example.netlify.app${path}`, {
     method,
     headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -638,7 +638,7 @@ test('Netlify API creates, updates, shares, and deletes sponsor leads', async ()
   assert.equal(sentResetEmail.status, 204)
   const emailMessage = sentEmails.at(-1)
   assert.deepEqual(emailMessage.to, [stlUser.email])
-  const resetToken = new URL(emailMessage.text.match(/https:\/\/digem\.example\.netlify\.app\/#[^\s]+/)[0]).hash.slice(1).split('=')[1]
+  const resetToken = new URL(emailMessage.text.match(/https:\/\/Digem\.example\.netlify\.app\/#[^\s]+/)[0]).hash.slice(1).split('=')[1]
   assert.ok(resetToken)
   const [storedResetToken] = await database.sql`SELECT token_hash FROM password_reset_tokens WHERE user_id = ${stlUser.id}`
   assert.notEqual(storedResetToken.token_hash, resetToken)

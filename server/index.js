@@ -99,11 +99,11 @@ function issueSession(res, userId) {
   const expiresAt = Date.now() + sessionLifetime
   db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(tokenHash(token), userId, expiresAt)
   const secure = isProduction ? '; Secure' : ''
-  res.setHeader('Set-Cookie', `digem_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${sessionLifetime / 1000}${secure}`)
+  res.setHeader('Set-Cookie', `Digem_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${sessionLifetime / 1000}${secure}`)
 }
 
 function requireAuth(req, res, next) {
-  const token = getCookie(req, 'digem_session')
+  const token = getCookie(req, 'Digem_session')
   if (!token) return res.status(401).json({ error: 'Sign in to continue.' })
 
   const session = db.prepare(`
@@ -429,7 +429,7 @@ app.post('/api/auth/password-reset/request', passwordResetLimiter, async (req, r
 
 app.post('/api/auth/logout', requireAuth, (req, res) => {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.sessionTokenHash)
-  res.setHeader('Set-Cookie', 'digem_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
+  res.setHeader('Set-Cookie', 'Digem_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
   res.status(204).end()
 })
 
@@ -559,7 +559,7 @@ app.delete('/api/account', requireAuth, async (req, res, next) => {
       db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id)
     })
     deleteAccountTransaction()
-    res.setHeader('Set-Cookie', 'digem_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
+    res.setHeader('Set-Cookie', 'Digem_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
     res.status(204).end()
   } catch (error) {
     next(error)
@@ -808,4 +808,4 @@ app.use((error, _req, res, _next) => {
 
 const port = Number(process.env.PORT || 3001)
 const host = process.env.HOST || (isProduction ? '0.0.0.0' : '127.0.0.1')
-app.listen(port, host, () => console.log(`DiGem API listening on http://${host}:${port}`))
+app.listen(port, host, () => console.log(`Digem API listening on http://${host}:${port}`))

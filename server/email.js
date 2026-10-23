@@ -29,9 +29,9 @@ export async function sendPasswordResetEmail({ email, displayName, resetUrl, env
     body: JSON.stringify({
       from,
       to: [email],
-      subject: 'Reset your DiGem team workspace password',
-      text: `Hi ${displayName},\n\nA Dev administrator requested a password reset for your DiGem team workspace account. Use this one-time link within 30 minutes to choose a new password:\n\n${resetUrl}\n\nIf you did not expect this email, you can ignore it.`,
-      html: `<p>Hi ${escapeHtml(displayName)},</p><p>A Dev administrator requested a password reset for your DiGem team workspace account. Use this one-time link within 30 minutes to choose a new password:</p><p><a href="${escapeHtml(resetUrl)}">Reset your password</a></p><p>If you did not expect this email, you can ignore it.</p>`,
+      subject: 'Reset your Digem team workspace password',
+      text: `Hi ${displayName},\n\nA Dev administrator requested a password reset for your Digem team workspace account. Use this one-time link within 30 minutes to choose a new password:\n\n${resetUrl}\n\nIf you did not expect this email, you can ignore it.`,
+      html: `<p>Hi ${escapeHtml(displayName)},</p><p>A Dev administrator requested a password reset for your Digem team workspace account. Use this one-time link within 30 minutes to choose a new password:</p><p><a href="${escapeHtml(resetUrl)}">Reset your password</a></p><p>If you did not expect this email, you can ignore it.</p>`,
     }),
   })
 
@@ -54,8 +54,8 @@ export async function sendTaskAssignmentEmail({ email, displayName, assignedBy, 
       from,
       to: [email],
       subject: `You're assigned: ${taskTitle}`,
-      text: `Hi ${displayName},\n\n${assignedBy} assigned you a ${taskType.toLowerCase()} task:\n${taskTitle}\n\nNext follow-up date: ${followUpDate}\n\nOpen the DiGem team workspace to review the task.`,
-      html: `<p>Hi ${escapeHtml(displayName)},</p><p>${escapeHtml(assignedBy)} assigned you a ${escapeHtml(taskType.toLowerCase())} task:</p><p><strong>${escapeHtml(taskTitle)}</strong></p><p><strong>Next follow-up date:</strong> ${escapeHtml(followUpDate)}</p><p>Open the DiGem team workspace to review the task.</p>`,
+      text: `Hi ${displayName},\n\n${assignedBy} assigned you a ${taskType.toLowerCase()} task:\n${taskTitle}\n\nNext follow-up date: ${followUpDate}\n\nOpen the Digem team workspace to review the task.`,
+      html: `<p>Hi ${escapeHtml(displayName)},</p><p>${escapeHtml(assignedBy)} assigned you a ${escapeHtml(taskType.toLowerCase())} task:</p><p><strong>${escapeHtml(taskTitle)}</strong></p><p><strong>Next follow-up date:</strong> ${escapeHtml(followUpDate)}</p><p>Open the Digem team workspace to review the task.</p>`,
     }),
   })
 

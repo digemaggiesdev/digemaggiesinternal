@@ -66,7 +66,7 @@ export function AuthScreen({ onAuthenticate, onResetPassword, onRequestPasswordR
 
   return <main className="auth-shell">
     <section className="auth-panel">
-      <img className="auth-logo" src="https://digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" />
+      <img className="auth-logo" src="https://Digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" />
       <div className="auth-eyebrow">TEAM OPERATIONS</div>
       <h1>{resetMode ? 'Choose a new password' : forgotMode ? 'Reset your password' : mode === 'signin' ? 'Internal Requests' : 'Join the workspace'}</h1>
       <p className="auth-description">{resetMode ? 'Choose a new password for your team workspace account.' : forgotMode ? 'Enter your account email and we will send a password reset link if an account exists.' : mode === 'signin' ? 'Sign in to manage part requests and sponsor relationships.' : 'Create your team account with the invite code shared by your lead.'}</p>

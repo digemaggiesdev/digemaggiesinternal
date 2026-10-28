@@ -32,6 +32,7 @@ import {
   addSponsorNote,
   deleteSponsor as removeSponsor,
   getRequests,
+  getRealtimeStatus,
   getSession,
   getSponsorLeads,
   getSponsors,
@@ -890,6 +891,7 @@ function App() {
   const [requestSort, setRequestSort] = useState<'newest' | 'urgency'>('newest')
   const [leadStatusFilter, setLeadStatusFilter] = useState('All lead statuses')
   const workspaceRefreshInProgress = useRef(false)
+  const workspaceRefreshRequested = useRef(false)
 
   useEffect(() => {
     let active = true
@@ -934,17 +936,46 @@ function App() {
   useEffect(() => {
     if (!user) return
     let active = true
+    let realtime: { close: () => void } | null = null
     const refreshVisibleWorkspace = async () => {
-      if (!active || document.visibilityState === 'hidden' || workspaceRefreshInProgress.current) return
+      if (!active || document.visibilityState === 'hidden') return
+      if (workspaceRefreshInProgress.current) {
+        workspaceRefreshRequested.current = true
+        return
+      }
       workspaceRefreshInProgress.current = true
       try {
-        await refreshWorkspace(user.tag === 'dev' && view === 'management')
+        do {
+          workspaceRefreshRequested.current = false
+          await refreshWorkspace(user.tag === 'dev' && view === 'management')
+        } while (active && workspaceRefreshRequested.current)
       } catch (error) {
         if (active) setActionError(error instanceof Error ? error.message : 'Could not refresh shared team records.')
       } finally {
         workspaceRefreshInProgress.current = false
       }
     }
+    void getRealtimeStatus().then(({ enabled }) => {
+      if (!active || !enabled) return
+      return import('ably').then(({ Realtime }) => {
+        if (!active) return
+        const client = new Realtime({ authUrl: '/api/realtime/token', authMethod: 'GET' })
+        realtime = client
+        return client.channels.get('digem-workspace').subscribe('workspace-updated', () => {
+          void refreshVisibleWorkspace()
+        }).catch((error: unknown) => {
+          if (active) {
+            console.error('Could not subscribe to workspace updates:', error)
+            setActionError('Live updates could not connect. The workspace will continue refreshing periodically.')
+          }
+        })
+      })
+    }).catch((error: unknown) => {
+      if (active) {
+        console.error('Could not check live update availability:', error)
+        setActionError('Live update status could not be checked. The workspace will continue refreshing periodically.')
+      }
+    })
     const interval = window.setInterval(() => void refreshVisibleWorkspace(), 15_000)
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') void refreshVisibleWorkspace()
@@ -954,6 +985,7 @@ function App() {
     return () => {
       active = false
       window.clearInterval(interval)
+      realtime?.close()
       window.removeEventListener('focus', refreshVisibleWorkspace)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }

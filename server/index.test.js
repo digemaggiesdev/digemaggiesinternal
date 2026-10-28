@@ -87,6 +87,10 @@ test('invite auth and shared records persist through the API', async () => {
   }
   const unauthenticated = await fetch(`${baseUrl}/api/requests`)
   assert.equal(unauthenticated.status, 401)
+  const realtimeStatus = await fetch(`${baseUrl}/api/realtime/status`)
+  assert.equal(typeof (await realtimeStatus.json()).enabled, 'boolean')
+  const unauthenticatedRealtimeToken = await fetch(`${baseUrl}/api/realtime/token`)
+  assert.equal(unauthenticatedRealtimeToken.status, 401)
 
   const invalidInvite = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',

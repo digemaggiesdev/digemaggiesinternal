@@ -2,6 +2,7 @@ import { getDatabase } from '@netlify/database'
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
 import { createPasswordResetUrl, sendPasswordResetEmail, sendTaskAssignmentEmail } from '../../server/email.js'
+import { createWorkspaceTokenRequest, publishWorkspaceChange, realtimeIsEnabled } from '../../server/realtime.js'
 import {
   accountDeleteSchema,
   accountPatchSchema,
@@ -143,7 +144,7 @@ async function listRecords(database, kind) {
   })
 }
 
-async function createRecord(database, kind, data) {
+async function createRecord(database, kind, data, environment) {
   const now = new Date().toISOString()
   const record = {
     ...data,
@@ -156,6 +157,7 @@ async function createRecord(database, kind, data) {
     INSERT INTO records (id, kind, data, created_at, updated_at)
     VALUES (${record.id}, ${kind}, ${JSON.stringify(record)}::jsonb, ${now}, ${now})
   `
+  await publishWorkspaceChange(environment)
   return record
 }
 
@@ -164,7 +166,7 @@ function updateBody(changes) {
   return `Updated ${Object.keys(changes).map((field) => labels[field] || field.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`)).join(', ')}`
 }
 
-async function updateRecord(database, kind, id, changes, actor) {
+async function updateRecord(database, kind, id, changes, actor, environment) {
   const [row] = await database.sql`SELECT data FROM records WHERE id = ${id} AND kind = ${kind}`
   if (!row) return null
   const now = new Date().toISOString()
@@ -178,6 +180,7 @@ async function updateRecord(database, kind, id, changes, actor) {
     UPDATE records SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${now}
     WHERE id = ${id} AND kind = ${kind}
   `
+  await publishWorkspaceChange(environment)
   return record
 }
 
@@ -186,7 +189,7 @@ async function listSponsorLeads(database) {
   return rows.map((row) => ({ ...row.data, updatedAt: row.updated_at, activity: Array.isArray(row.data.activity) ? row.data.activity : [] }))
 }
 
-async function createSponsorLead(database, data) {
+async function createSponsorLead(database, data, environment) {
   const now = new Date().toISOString()
   const record = {
     ...data,
@@ -200,10 +203,11 @@ async function createSponsorLead(database, data) {
     INSERT INTO sponsor_leads (id, data, created_at, updated_at)
     VALUES (${record.id}, ${JSON.stringify(record)}::jsonb, ${now}, ${now})
   `
+  await publishWorkspaceChange(environment)
   return record
 }
 
-async function updateSponsorLead(database, id, changes, actor) {
+async function updateSponsorLead(database, id, changes, actor, environment) {
   const [row] = await database.sql`SELECT data FROM sponsor_leads WHERE id = ${id}`
   if (!row) return null
   const now = new Date().toISOString()
@@ -217,10 +221,11 @@ async function updateSponsorLead(database, id, changes, actor) {
     UPDATE sponsor_leads SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${now}
     WHERE id = ${id}
   `
+  await publishWorkspaceChange(environment)
   return record
 }
 
-async function addRecordActivity(database, kind, id, actor, body) {
+async function addRecordActivity(database, kind, id, actor, body, environment) {
   const isLead = kind === 'sponsor_lead'
   const [row] = isLead
     ? await database.sql`SELECT data FROM sponsor_leads WHERE id = ${id}`
@@ -237,6 +242,7 @@ async function addRecordActivity(database, kind, id, actor, body) {
   } else {
     await database.sql`UPDATE records SET data = ${JSON.stringify(record)}::jsonb, updated_at = ${now} WHERE id = ${id} AND kind = ${kind}`
   }
+  await publishWorkspaceChange(environment)
   return record
 }
 
@@ -357,6 +363,9 @@ export function createApiHandler(database, environment = process.env) {
         await database.sql`SELECT 1`
         return Response.json({ status: 'ok' })
       }
+      if (method === 'GET' && pathname === '/api/realtime/status') {
+        return Response.json({ enabled: realtimeIsEnabled(environment) })
+      }
 
       if (method === 'POST' && (pathname === '/api/auth/register' || pathname === '/api/auth/login')) {
         const parsed = await parseBody(request, pathname.endsWith('/register') ? registerSchema : loginSchema)
@@ -386,6 +395,7 @@ export function createApiHandler(database, environment = process.env) {
             )
             await client.query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [sha256(token), id, expiresAt])
             await client.query('COMMIT')
+            await publishWorkspaceChange(environment)
             return Response.json({ user: publicUser(result.rows[0]) }, {
               status: 201,
               headers: { 'Set-Cookie': setSessionCookie(request, token) },
@@ -486,6 +496,10 @@ export function createApiHandler(database, environment = process.env) {
       const session = await findSession(database, request)
       if (!session) return jsonError('Sign in to continue.', 401)
 
+      if (method === 'GET' && pathname === '/api/realtime/token') {
+        const tokenRequest = await createWorkspaceTokenRequest(environment, session.user.id)
+        return Response.json(tokenRequest)
+      }
       if (method === 'GET' && pathname === '/api/auth/me') return Response.json({ user: session.user })
       if (method === 'POST' && pathname === '/api/auth/logout') {
         await database.sql`DELETE FROM sessions WHERE token_hash = ${session.tokenHash}`
@@ -566,6 +580,7 @@ export function createApiHandler(database, environment = process.env) {
           await client.query("UPDATE sponsor_leads SET data = data - 'assigneeId', updated_at = NOW() WHERE data->>'assigneeId' = $1", [managedUserId])
           await client.query('DELETE FROM users WHERE id = $1', [managedUserId])
           await client.query('COMMIT')
+          await publishWorkspaceChange(environment)
           return new Response(null, { status: 204 })
         } catch (error) {
           await client.query('ROLLBACK')
@@ -591,6 +606,7 @@ export function createApiHandler(database, environment = process.env) {
             await database.sql`DELETE FROM sessions WHERE user_id = ${managedUserId}`
             await database.sql`DELETE FROM password_reset_tokens WHERE user_id = ${managedUserId}`
           }
+          if (updated) await publishWorkspaceChange(environment)
           return updated ? Response.json({ user: publicUser(updated) }) : jsonError('Team member not found.', 404)
         } catch (error) {
           if (error.code === '23505' || error.cause?.code === '23505') {
@@ -620,7 +636,7 @@ export function createApiHandler(database, environment = process.env) {
           )
           if (emailResponse) return emailResponse
         }
-        const record = await updateRecord(database, 'part_request', managedRequestId, parsed.data, session.user.displayName)
+        const record = await updateRecord(database, 'part_request', managedRequestId, parsed.data, session.user.displayName, environment)
         return record ? Response.json({ record }) : jsonError('Part request not found.', 404)
       }
 
@@ -628,7 +644,7 @@ export function createApiHandler(database, environment = process.env) {
       if (managedSponsorshipId && method === 'PATCH') {
         const parsed = await parseBody(request, sponsorshipPatchSchema)
         if (parsed.response) return parsed.response
-        const record = await updateRecord(database, 'sponsorship', managedSponsorshipId, parsed.data, session.user.displayName)
+        const record = await updateRecord(database, 'sponsorship', managedSponsorshipId, parsed.data, session.user.displayName, environment)
         return record ? Response.json({ record }) : jsonError('Sponsorship not found.', 404)
       }
 
@@ -652,7 +668,7 @@ export function createApiHandler(database, environment = process.env) {
           )
           if (emailResponse) return emailResponse
         }
-        const record = await updateSponsorLead(database, managedSponsorLeadId, parsed.data, session.user.displayName)
+        const record = await updateSponsorLead(database, managedSponsorLeadId, parsed.data, session.user.displayName, environment)
         return record ? Response.json({ record }) : jsonError('Sponsor lead not found.', 404)
       }
 
@@ -666,6 +682,7 @@ export function createApiHandler(database, environment = process.env) {
             WHERE id = ${session.user.id}
             RETURNING id, email, display_name, subteam, tag
           `
+          await publishWorkspaceChange(environment)
           return Response.json({ user: publicUser(updated) })
         } catch (error) {
           if (error.code === '23505' || error.cause?.code === '23505') {
@@ -720,6 +737,7 @@ export function createApiHandler(database, environment = process.env) {
           LEFT JOIN users AS reviewer ON reviewer.id = requests.reviewed_by
           WHERE requests.id = ${id}
         `
+        await publishWorkspaceChange(environment)
         return Response.json({ request: created }, { status: 201 })
       }
 
@@ -778,6 +796,7 @@ export function createApiHandler(database, environment = process.env) {
           LEFT JOIN users AS reviewer ON reviewer.id = requests.reviewed_by
           WHERE requests.id = ${subteamChangeRequestId}
         `
+        await publishWorkspaceChange(environment)
         return Response.json({ request: reviewed })
       }
       if (subteamChangeRequestId && method === 'DELETE') {
@@ -786,9 +805,9 @@ export function createApiHandler(database, environment = process.env) {
           WHERE id = ${subteamChangeRequestId} AND user_id = ${session.user.id} AND status = 'pending'
           RETURNING id
         `
-        return deleted.length
-          ? new Response(null, { status: 204 })
-          : jsonError('Pending subteam change request not found.', 404)
+        if (!deleted.length) return jsonError('Pending subteam change request not found.', 404)
+        await publishWorkspaceChange(environment)
+        return new Response(null, { status: 204 })
       }
 
       if (pathname === '/api/account' && method === 'DELETE') {
@@ -812,6 +831,7 @@ export function createApiHandler(database, environment = process.env) {
           await client.query("UPDATE sponsor_leads SET data = data - 'assigneeId', updated_at = NOW() WHERE data->>'assigneeId' = $1", [session.user.id])
           await client.query('DELETE FROM users WHERE id = $1', [session.user.id])
           await client.query('COMMIT')
+          await publishWorkspaceChange(environment)
           return new Response(null, { status: 204, headers: { 'Set-Cookie': setSessionCookie(request, '', 0) } })
         } catch (error) {
           await client.query('ROLLBACK')
@@ -841,7 +861,7 @@ export function createApiHandler(database, environment = process.env) {
           ...parsed.data,
           requesterSubteam: session.user.subteam,
           createdBy: session.user.displayName,
-        })
+        }, environment)
         return Response.json({ record }, { status: 201 })
       }
 
@@ -853,7 +873,7 @@ export function createApiHandler(database, environment = process.env) {
         if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to add record notes.', 403)
         const parsed = await parseBody(request, recordActivitySchema)
         if (parsed.response) return parsed.response
-        const record = await addRecordActivity(database, 'part_request', requestActivityId, session.user.displayName, parsed.data.body)
+        const record = await addRecordActivity(database, 'part_request', requestActivityId, session.user.displayName, parsed.data.body, environment)
         return record ? Response.json({ record }, { status: 201 }) : jsonError('Part request not found.', 404)
       }
       if (requestId && method === 'PATCH') {
@@ -892,13 +912,15 @@ export function createApiHandler(database, environment = process.env) {
           )
           if (emailResponse) return emailResponse
         }
-        const record = await updateRecord(database, 'part_request', requestId, parsed.data, session.user.displayName)
+        const record = await updateRecord(database, 'part_request', requestId, parsed.data, session.user.displayName, environment)
         return record ? Response.json({ record }) : jsonError('Part request not found.', 404)
       }
       if (requestId && method === 'DELETE') {
         if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to delete shared records.', 403)
         const deleted = await database.sql`DELETE FROM records WHERE id = ${requestId} AND kind = 'part_request' RETURNING id`
-        return deleted.length ? new Response(null, { status: 204 }) : jsonError('Part request not found.', 404)
+        if (!deleted.length) return jsonError('Part request not found.', 404)
+        await publishWorkspaceChange(environment)
+        return new Response(null, { status: 204 })
       }
 
       if (pathname === '/api/sponsorships' && method === 'GET') {
@@ -907,7 +929,7 @@ export function createApiHandler(database, environment = process.env) {
       if (pathname === '/api/sponsorships' && method === 'POST') {
         const parsed = await parseBody(request, sponsorshipSchema)
         if (parsed.response) return parsed.response
-        const record = await createRecord(database, 'sponsorship', { ...parsed.data, createdBy: session.user.displayName })
+        const record = await createRecord(database, 'sponsorship', { ...parsed.data, createdBy: session.user.displayName }, environment)
         return Response.json({ record }, { status: 201 })
       }
 
@@ -919,7 +941,7 @@ export function createApiHandler(database, environment = process.env) {
         if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to add record notes.', 403)
         const parsed = await parseBody(request, recordActivitySchema)
         if (parsed.response) return parsed.response
-        const record = await addRecordActivity(database, 'sponsorship', sponsorshipActivityId, session.user.displayName, parsed.data.body)
+        const record = await addRecordActivity(database, 'sponsorship', sponsorshipActivityId, session.user.displayName, parsed.data.body, environment)
         return record ? Response.json({ record }, { status: 201 }) : jsonError('Sponsorship not found.', 404)
       }
       if (sponsorshipId && method === 'PATCH') {
@@ -929,13 +951,15 @@ export function createApiHandler(database, environment = process.env) {
         if (!canEditSharedRecords(session.user) && !(canDelegate(session.user) && followUpOnly)) {
           return jsonError('STL or Dev access is required to edit shared records. Exec may update renewal / follow-up dates.', 403)
         }
-        const record = await updateRecord(database, 'sponsorship', sponsorshipId, parsed.data, session.user.displayName)
+        const record = await updateRecord(database, 'sponsorship', sponsorshipId, parsed.data, session.user.displayName, environment)
         return record ? Response.json({ record }) : jsonError('Sponsorship not found.', 404)
       }
       if (sponsorshipId && method === 'DELETE') {
         if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to delete shared records.', 403)
         const deleted = await database.sql`DELETE FROM records WHERE id = ${sponsorshipId} AND kind = 'sponsorship' RETURNING id`
-        return deleted.length ? new Response(null, { status: 204 }) : jsonError('Sponsorship not found.', 404)
+        if (!deleted.length) return jsonError('Sponsorship not found.', 404)
+        await publishWorkspaceChange(environment)
+        return new Response(null, { status: 204 })
       }
 
       if (pathname === '/api/sponsor-leads' && method === 'GET') {
@@ -948,7 +972,7 @@ export function createApiHandler(database, environment = process.env) {
           ...parsed.data,
           requesterSubteam: session.user.subteam,
           createdBy: session.user.displayName,
-        })
+        }, environment)
         return Response.json({ record }, { status: 201 })
       }
 
@@ -960,7 +984,7 @@ export function createApiHandler(database, environment = process.env) {
         if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to add record notes.', 403)
         const parsed = await parseBody(request, recordActivitySchema)
         if (parsed.response) return parsed.response
-        const record = await addRecordActivity(database, 'sponsor_lead', sponsorLeadActivityId, session.user.displayName, parsed.data.body)
+        const record = await addRecordActivity(database, 'sponsor_lead', sponsorLeadActivityId, session.user.displayName, parsed.data.body, environment)
         return record ? Response.json({ record }, { status: 201 }) : jsonError('Sponsor lead not found.', 404)
       }
       if (sponsorLeadId && method === 'PATCH') {
@@ -999,13 +1023,15 @@ export function createApiHandler(database, environment = process.env) {
           )
           if (emailResponse) return emailResponse
         }
-        const record = await updateSponsorLead(database, sponsorLeadId, parsed.data, session.user.displayName)
+        const record = await updateSponsorLead(database, sponsorLeadId, parsed.data, session.user.displayName, environment)
         return record ? Response.json({ record }) : jsonError('Sponsor lead not found.', 404)
       }
       if (sponsorLeadId && method === 'DELETE') {
         if (!canEditSharedRecords(session.user)) return jsonError('STL or Dev access is required to delete shared records.', 403)
         const deleted = await database.sql`DELETE FROM sponsor_leads WHERE id = ${sponsorLeadId} RETURNING id`
-        return deleted.length ? new Response(null, { status: 204 }) : jsonError('Sponsor lead not found.', 404)
+        if (!deleted.length) return jsonError('Sponsor lead not found.', 404)
+        await publishWorkspaceChange(environment)
+        return new Response(null, { status: 204 })
       }
 
       return jsonError('Not found.', 404)

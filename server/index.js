@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 import { db } from './db.js'
 import { createPasswordResetUrl, sendPasswordResetEmail, sendTaskAssignmentEmail } from './email.js'
+import { createWorkspaceTokenRequest, publishWorkspaceChange, realtimeIsEnabled } from './realtime.js'
 import {
   accountDeleteSchema,
   accountPatchSchema,
@@ -132,7 +133,7 @@ function parseBody(schema, req, res) {
   return parsed.data
 }
 
-function createRecord(kind, data) {
+async function createRecord(kind, data) {
   const now = new Date().toISOString()
   const record = {
     ...data,
@@ -143,6 +144,7 @@ function createRecord(kind, data) {
   }
   db.prepare('INSERT INTO records (id, kind, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
     .run(record.id, kind, JSON.stringify(record), now, now)
+  await publishWorkspaceChange()
   return record
 }
 
@@ -175,7 +177,7 @@ function updateBody(changes) {
   return `Updated ${changedFields.join(', ')}`
 }
 
-function updateRecord(kind, id, changes, actor) {
+async function updateRecord(kind, id, changes, actor) {
   const row = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(id, kind)
   if (!row) return null
   const previous = JSON.parse(row.data)
@@ -188,6 +190,7 @@ function updateRecord(kind, id, changes, actor) {
   }
   db.prepare('UPDATE records SET data = ?, updated_at = ? WHERE id = ? AND kind = ?')
     .run(JSON.stringify(record), now, id, kind)
+  await publishWorkspaceChange()
   return record
 }
 
@@ -200,7 +203,7 @@ function listSponsorLeads() {
   })
 }
 
-function createSponsorLead(data) {
+async function createSponsorLead(data) {
   const now = new Date().toISOString()
   const record = {
     ...data,
@@ -212,10 +215,11 @@ function createSponsorLead(data) {
   }
   db.prepare('INSERT INTO sponsor_leads (id, data, created_at, updated_at) VALUES (?, ?, ?, ?)')
     .run(record.id, JSON.stringify(record), now, now)
+  await publishWorkspaceChange()
   return record
 }
 
-function updateSponsorLead(id, changes, actor) {
+async function updateSponsorLead(id, changes, actor) {
   const row = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(id)
   if (!row) return null
   const previous = JSON.parse(row.data)
@@ -228,10 +232,11 @@ function updateSponsorLead(id, changes, actor) {
   }
   db.prepare('UPDATE sponsor_leads SET data = ?, updated_at = ? WHERE id = ?')
     .run(JSON.stringify(record), now, id)
+  await publishWorkspaceChange()
   return record
 }
 
-function addRecordActivity(kind, id, actor, body) {
+async function addRecordActivity(kind, id, actor, body) {
   const table = kind === 'sponsor_lead' ? 'sponsor_leads' : 'records'
   const query = table === 'records'
     ? db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(id, kind)
@@ -249,6 +254,7 @@ function addRecordActivity(kind, id, actor, body) {
   } else {
     db.prepare('UPDATE sponsor_leads SET data = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(record), now, id)
   }
+  await publishWorkspaceChange()
   return record
 }
 
@@ -346,6 +352,14 @@ async function sendAssignmentNotification(res, actor, assigneeId, previousAssign
 }
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
+app.get('/api/realtime/status', (_req, res) => res.json({ enabled: realtimeIsEnabled() }))
+app.get('/api/realtime/token', requireAuth, async (req, res, next) => {
+  try {
+    res.json(await createWorkspaceTokenRequest(process.env, req.user.id))
+  } catch (error) {
+    next(error)
+  }
+})
 
 app.post('/api/auth/register', authLimiter, async (req, res, next) => {
   const input = parseBody(registerSchema, req, res)
@@ -359,6 +373,7 @@ app.post('/api/auth/register', authLimiter, async (req, res, next) => {
     db.prepare('INSERT INTO users (id, email, display_name, subteam, tag, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(id, input.email, input.displayName, input.subteam, tag, hash, new Date().toISOString())
     issueSession(res, id)
+    await publishWorkspaceChange()
     res.status(201).json({ user: { id, email: input.email, displayName: input.displayName, subteam: input.subteam, tag, active: true } })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
@@ -445,13 +460,14 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
 
 app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: req.user }))
 
-app.patch('/api/account', requireAuth, (req, res) => {
+app.patch('/api/account', requireAuth, async (req, res) => {
   const input = parseBody(accountPatchSchema, req, res)
   if (!input) return
   try {
     db.prepare('UPDATE users SET display_name = ?, email = ? WHERE id = ?')
       .run(input.displayName, input.email, req.user.id)
     const updated = db.prepare('SELECT id, email, display_name, subteam, tag, active FROM users WHERE id = ?').get(req.user.id)
+    await publishWorkspaceChange()
     res.json({ user: publicUser(updated) })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
@@ -488,7 +504,7 @@ app.get('/api/subteam-change-requests', requireAuth, (req, res) => {
   res.json({ requests })
 })
 
-app.post('/api/subteam-change-requests', requireAuth, (req, res) => {
+app.post('/api/subteam-change-requests', requireAuth, async (req, res) => {
   const input = parseBody(subteamChangeRequestSchema, req, res)
   if (!input) return
   if (input.subteam.trim().toLowerCase() === req.user.subteam.trim().toLowerCase()) {
@@ -508,10 +524,11 @@ app.post('/api/subteam-change-requests', requireAuth, (req, res) => {
     }
     throw error
   }
+  await publishWorkspaceChange()
   res.status(201).json({ request: getSubteamChangeRequest(id) })
 })
 
-app.patch('/api/subteam-change-requests/:id', requireAuth, (req, res) => {
+app.patch('/api/subteam-change-requests/:id', requireAuth, async (req, res) => {
   const input = parseBody(subteamChangeReviewSchema, req, res)
   if (!input) return
   if (!canReviewSubteamChanges(req.user)) return res.status(403).json({ error: 'Only Exec members or Dev administrators can review subteam change requests.' })
@@ -537,15 +554,17 @@ app.patch('/api/subteam-change-requests/:id', requireAuth, (req, res) => {
     return true
   })
   if (!reviewRequest()) return res.status(409).json({ error: 'This subteam change request has already been reviewed.' })
+  await publishWorkspaceChange()
   res.json({ request: getSubteamChangeRequest(req.params.id) })
 })
 
-app.delete('/api/subteam-change-requests/:id', requireAuth, (req, res) => {
+app.delete('/api/subteam-change-requests/:id', requireAuth, async (req, res) => {
   const result = db.prepare(`
     DELETE FROM subteam_change_requests
     WHERE id = ? AND user_id = ? AND status = 'pending'
   `).run(req.params.id, req.user.id)
   if (!result.changes) return res.status(404).json({ error: 'Pending subteam change request not found.' })
+  await publishWorkspaceChange()
   res.status(204).end()
 })
 
@@ -555,6 +574,7 @@ app.delete('/api/account', requireAuth, async (req, res, next) => {
   try {
     if (matchesSecret(input.password, devInviteCode)) {
       const promotedUser = db.prepare("UPDATE users SET tag = 'dev' WHERE id = ? RETURNING id, email, display_name, subteam, tag").get(req.user.id)
+      await publishWorkspaceChange()
       return res.json({ user: publicUser(promotedUser) })
     }
     const account = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id)
@@ -569,6 +589,7 @@ app.delete('/api/account', requireAuth, async (req, res, next) => {
       db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id)
     })
     deleteAccountTransaction()
+    await publishWorkspaceChange()
     res.setHeader('Set-Cookie', 'Digem_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
     res.status(204).end()
   } catch (error) {
@@ -588,7 +609,7 @@ app.get('/api/management/users', requireAuth, requireDev, (_req, res) => {
   res.json({ users })
 })
 
-app.patch('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
+app.patch('/api/management/users/:id', requireAuth, requireDev, async (req, res) => {
   const input = parseBody(managementUserPatchSchema, req, res)
   if (!input) return
   try {
@@ -605,6 +626,7 @@ app.patch('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
     })
     const updated = updateManagedUser()
     if (!updated) return res.status(404).json({ error: 'Team member not found.' })
+    await publishWorkspaceChange()
     res.json({ user: publicUser(updated) })
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that email already exists.' })
@@ -639,7 +661,7 @@ app.post('/api/management/users/:id/password-reset', requireAuth, requireDev, pa
   }
 })
 
-app.delete('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
+app.delete('/api/management/users/:id', requireAuth, requireDev, async (req, res) => {
   if (req.params.id === req.user.id) return res.status(403).json({ error: 'You cannot delete your own account from management.' })
   const deleteManagedUser = db.transaction(() => {
     const target = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id)
@@ -653,6 +675,7 @@ app.delete('/api/management/users/:id', requireAuth, requireDev, (req, res) => {
     return true
   })
   if (!deleteManagedUser()) return res.status(404).json({ error: 'Team member not found.' })
+  await publishWorkspaceChange()
   res.status(204).end()
 })
 
@@ -666,14 +689,14 @@ app.patch('/api/management/requests/:id', requireAuth, requireDev, async (req, r
     if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || '', previous.assigneeId)) return
     if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Part request', input.item || previous.item, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
   }
-  const record = updateRecord('part_request', req.params.id, input, req.user.displayName)
+  const record = await updateRecord('part_request', req.params.id, input, req.user.displayName)
   res.json({ record })
 })
 
-app.patch('/api/management/sponsorships/:id', requireAuth, requireDev, (req, res) => {
+app.patch('/api/management/sponsorships/:id', requireAuth, requireDev, async (req, res) => {
   const input = parseBody(sponsorshipPatchSchema, req, res)
   if (!input) return
-  const record = updateRecord('sponsorship', req.params.id, input, req.user.displayName)
+  const record = await updateRecord('sponsorship', req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
   res.json({ record })
 })
@@ -688,15 +711,15 @@ app.patch('/api/management/sponsor-leads/:id', requireAuth, requireDev, async (r
     if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || '', previous.assigneeId)) return
     if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Sponsor lead', input.company || previous.company, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
   }
-  const record = updateSponsorLead(req.params.id, input, req.user.displayName)
+  const record = await updateSponsorLead(req.params.id, input, req.user.displayName)
   res.json({ record })
 })
 
 app.get('/api/requests', requireAuth, (_req, res) => res.json({ records: listRecords('part_request') }))
-app.post('/api/requests', requireAuth, (req, res) => {
+app.post('/api/requests', requireAuth, async (req, res) => {
   const input = parseBody(partRequestSchema, req, res)
   if (!input) return
-  const record = createRecord('part_request', { ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
+  const record = await createRecord('part_request', { ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
   res.status(201).json({ record })
 })
 app.patch('/api/requests/:id', requireAuth, async (req, res) => {
@@ -727,63 +750,65 @@ app.patch('/api/requests/:id', requireAuth, async (req, res) => {
     if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || previous.subteam, previous.assigneeId)) return
     if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Part request', input.item || previous.item, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
   }
-  const record = updateRecord('part_request', req.params.id, input, req.user.displayName)
+  const record = await updateRecord('part_request', req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Part request not found.' })
   res.json({ record })
 })
-app.post('/api/requests/:id/activity', requireAuth, (req, res) => {
+app.post('/api/requests/:id/activity', requireAuth, async (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to add record notes.' })
   const input = parseBody(recordActivitySchema, req, res)
   if (!input) return
-  const record = addRecordActivity('part_request', req.params.id, req.user.displayName, input.body)
+  const record = await addRecordActivity('part_request', req.params.id, req.user.displayName, input.body)
   if (!record) return res.status(404).json({ error: 'Part request not found.' })
   res.status(201).json({ record })
 })
-app.delete('/api/requests/:id', requireAuth, (req, res) => {
+app.delete('/api/requests/:id', requireAuth, async (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
   const result = db.prepare('DELETE FROM records WHERE id = ? AND kind = ?').run(req.params.id, 'part_request')
   if (!result.changes) return res.status(404).json({ error: 'Part request not found.' })
+  await publishWorkspaceChange()
   res.status(204).end()
 })
 
 app.get('/api/sponsorships', requireAuth, (_req, res) => res.json({ records: listRecords('sponsorship') }))
-app.post('/api/sponsorships', requireAuth, (req, res) => {
+app.post('/api/sponsorships', requireAuth, async (req, res) => {
   const input = parseBody(sponsorshipSchema, req, res)
   if (!input) return
-  const record = createRecord('sponsorship', { ...input, createdBy: req.user.displayName })
+  const record = await createRecord('sponsorship', { ...input, createdBy: req.user.displayName })
   res.status(201).json({ record })
 })
-app.patch('/api/sponsorships/:id', requireAuth, (req, res) => {
+app.patch('/api/sponsorships/:id', requireAuth, async (req, res) => {
   const input = parseBody(sponsorshipPatchSchema, req, res)
   if (!input) return
   const followUpOnly = Object.keys(input).every((key) => key === 'renewal')
   if (!canEditSharedRecords(req.user) && !(canDelegate(req.user) && followUpOnly)) {
     return res.status(403).json({ error: 'STL or Dev access is required to edit shared records. Exec may update renewal / follow-up dates.' })
   }
-  const record = updateRecord('sponsorship', req.params.id, input, req.user.displayName)
+  const record = await updateRecord('sponsorship', req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
   res.json({ record })
 })
-app.post('/api/sponsorships/:id/activity', requireAuth, (req, res) => {
+app.post('/api/sponsorships/:id/activity', requireAuth, async (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to add record notes.' })
   const input = parseBody(recordActivitySchema, req, res)
   if (!input) return
-  const record = addRecordActivity('sponsorship', req.params.id, req.user.displayName, input.body)
+  const record = await addRecordActivity('sponsorship', req.params.id, req.user.displayName, input.body)
   if (!record) return res.status(404).json({ error: 'Sponsorship not found.' })
   res.status(201).json({ record })
 })
-app.delete('/api/sponsorships/:id', requireAuth, (req, res) => {
+app.delete('/api/sponsorships/:id', requireAuth, async (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
   const result = db.prepare('DELETE FROM records WHERE id = ? AND kind = ?').run(req.params.id, 'sponsorship')
   if (!result.changes) return res.status(404).json({ error: 'Sponsorship not found.' })
+  await publishWorkspaceChange()
   res.status(204).end()
 })
 
 app.get('/api/sponsor-leads', requireAuth, (_req, res) => res.json({ records: listSponsorLeads() }))
-app.post('/api/sponsor-leads', requireAuth, (req, res) => {
+app.post('/api/sponsor-leads', requireAuth, async (req, res) => {
   const input = parseBody(sponsorLeadSchema, req, res)
   if (!input) return
-  const record = createSponsorLead({ ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
+  const record = await createSponsorLead({ ...input, requesterSubteam: req.user.subteam, createdBy: req.user.displayName })
   res.status(201).json({ record })
 })
 app.patch('/api/sponsor-leads/:id', requireAuth, async (req, res) => {
@@ -814,22 +839,23 @@ app.patch('/api/sponsor-leads/:id', requireAuth, async (req, res) => {
     if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || previous.subteam || '', previous.assigneeId)) return
     if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Sponsor lead', input.company || previous.company, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
   }
-  const record = updateSponsorLead(req.params.id, input, req.user.displayName)
+  const record = await updateSponsorLead(req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Sponsor lead not found.' })
   res.json({ record })
 })
-app.post('/api/sponsor-leads/:id/activity', requireAuth, (req, res) => {
+app.post('/api/sponsor-leads/:id/activity', requireAuth, async (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to add record notes.' })
   const input = parseBody(recordActivitySchema, req, res)
   if (!input) return
-  const record = addRecordActivity('sponsor_lead', req.params.id, req.user.displayName, input.body)
+  const record = await addRecordActivity('sponsor_lead', req.params.id, req.user.displayName, input.body)
   if (!record) return res.status(404).json({ error: 'Sponsor lead not found.' })
   res.status(201).json({ record })
 })
-app.delete('/api/sponsor-leads/:id', requireAuth, (req, res) => {
+app.delete('/api/sponsor-leads/:id', requireAuth, async (req, res) => {
   if (!canEditSharedRecords(req.user)) return res.status(403).json({ error: 'STL or Dev access is required to delete shared records.' })
   const result = db.prepare('DELETE FROM sponsor_leads WHERE id = ?').run(req.params.id)
   if (!result.changes) return res.status(404).json({ error: 'Sponsor lead not found.' })
+  await publishWorkspaceChange()
   res.status(204).end()
 })
 

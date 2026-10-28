@@ -12,7 +12,7 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. The local team invite code is `local-team-code`; set `TEAM_INVITE_CODE` in `.env` to override it. The local Dev invite code is `local-dev-code`; set `DEV_INVITE_CODE` to override it. To send password reset and task assignment emails, configure `RESEND_API_KEY` and `RESEND_FROM` with a verified sender in `.env`; password reset links also use `APP_URL=http://localhost:5173`. Restart the server after changing environment variables.
+Open the Vite URL shown in the terminal. The development command runs the local Express API on port 3001. The local team invite code is `local-team-code`; set `TEAM_INVITE_CODE` in `.env` to override it. The local Dev invite code is `local-dev-code`; set `DEV_INVITE_CODE` to override it. To enable live updates locally, add an Ably API key as `ABLY_API_KEY` in `.env`. To send password reset and task assignment emails, configure `RESEND_API_KEY` and `RESEND_FROM` with a verified sender in `.env`; password reset links also use `APP_URL=http://localhost:5173`. Restart the server after changing environment variables.
 
 Useful commands:
 
@@ -26,7 +26,7 @@ npm run build
 
 1. Connect this repository to your Netlify site and enable **Netlify Database** under the site's **Data & storage** settings. Netlify Database requires a credit-based plan.
 2. The repository includes `@netlify/database`, the `/api/*` function at `netlify/functions/api.mjs`, and the initial schema migration at `netlify/database/migrations/0001_initial_schema.sql`. Netlify applies migrations during deploy and provides `NETLIFY_DB_URL` to functions automatically.
-3. Set `TEAM_INVITE_CODE` and a different, unique `DEV_INVITE_CODE` as private Netlify Functions runtime environment variables. For password reset and task assignment emails, also set `RESEND_API_KEY` and `RESEND_FROM` (an address on a verified Resend domain); password reset links additionally require `APP_URL` set to your site's public URL. Keep these as server-side secrets; do not expose them as frontend build variables. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
+3. Set `TEAM_INVITE_CODE` and a different, unique `DEV_INVITE_CODE` as private Netlify Functions runtime environment variables. Set `ABLY_API_KEY` to enable real-time workspace updates. For password reset and task assignment emails, also set `RESEND_API_KEY` and `RESEND_FROM` (an address on a verified Resend domain); password reset links additionally require `APP_URL` set to your site's public URL. Keep these as server-side secrets; do not expose them as frontend build variables. No `API_ORIGIN`, `PORT`, or `DATABASE_PATH` is needed.
 4. Use `npm ci && npm run build` and `dist` as the publish directory; these are configured in `netlify.toml`.
 5. Deploy and check `https://<your-site>.netlify.app/api/health` returns `{"status":"ok"}`. Create the first account with the invite code.
 
@@ -39,7 +39,7 @@ Production sign-in, part requests, sponsor leads, and sponsorship records are ha
 - Signed-in members can update their account name and email from the Account page. Subteam changes require an in-app request and approval from an Exec member or Dev administrator; the current subteam stays active until approval. Exec membership can be assigned by a Dev administrator and cannot be self-selected during sign-up or requested in the app. Existing Exec assignments are preserved, so an administrator should verify them. Account deletion requires the current password, removes the profile, and unassigns their tasks while preserving shared records.
 - Dev administrators see a Management tab for editing any user’s name, email, subteam (including Exec), and access tag (Member or STL), and editing all fields on part requests, sponsorships, and sponsor leads. The Dev tag itself is only granted by the unique Dev invite code.
 - Any signed-in team member can read and submit shared requests, sponsor leads, and sponsorships. Members have a My tasks overview where they can claim unassigned tasks posted by their own subteam; Business members can claim any unassigned task. Members can update status and follow-up details on their assigned tasks, including communication status for part requests. They cannot take tasks assigned to someone else or edit request/lead details. Dev users can assign any team member; STL users can assign members of their own subteam. An STL user in Exec keeps Exec assignment access, including assignments to Business or the task’s originating subteam.
-- Shared workspace data refreshes automatically every 15 seconds while the site is open, and refreshes when you return to the tab.
+- Shared workspace changes are pushed to everyone viewing the site through Ably. If Ably is unavailable, the page also refreshes periodically and when you return to the tab.
 - Sponsor leads can include multiple support types: financial contributions, parts and materials, equipment, services or expertise, and other offers. The cash estimate is optional.
 - CSV export opens in Excel or Google Sheets, but it is a snapshot rather than live spreadsheet synchronization.
 - Existing data in the local SQLite database is not automatically migrated into Netlify Database; export or migrate it before cutover if it needs to be kept.

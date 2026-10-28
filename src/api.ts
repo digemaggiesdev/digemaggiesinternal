@@ -156,6 +156,10 @@ export async function getSession() {
   }
 }
 
+export async function getRealtimeStatus() {
+  return request<{ enabled: boolean }>('/api/realtime/status')
+}
+
 export async function signIn(email: string, password: string) {
   const result = await request<{ user: TeamUser }>('/api/auth/login', {
     method: 'POST',

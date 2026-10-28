@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowDownToLine,
   ArrowUpRight,
@@ -274,6 +274,109 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
     {visibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}{member.id === user?.id ? ' (You)' : ''}</option>)}
     {assignedId && !visibleMembers.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
   </select>
+}
+
+type MemberTask = {
+  id: string
+  kind: 'part_request' | 'sponsor_lead'
+  title: string
+  sourceSubteam: string
+  status: RequestStatus | SponsorLeadStatus
+  communication?: CommunicationStatus
+  nextFollowUpAt: string
+}
+
+function MemberTaskOverview({ user, requests, leads, onClaim, onRequestUpdate, onLeadStatusChange, onLeadFollowUpChange }: {
+  user: TeamUser
+  requests: PartRequest[]
+  leads: SponsorLead[]
+  onClaim: (kind: MemberTask['kind'], id: string) => void
+  onRequestUpdate: (id: string, field: 'status' | 'communication' | 'nextFollowUpAt', value: string) => void
+  onLeadStatusChange: (id: string, status: SponsorLeadStatus) => void
+  onLeadFollowUpChange: (id: string, date: string) => void
+}) {
+  const isBusiness = user.subteam.trim().toLowerCase() === 'business'
+  const isActiveRequest = (request: PartRequest) => !['Received', 'Closed'].includes(request.status)
+  const isActiveLead = (lead: SponsorLead) => !['Converted', 'Not pursuing'].includes(lead.status)
+  const assignedTasks: MemberTask[] = [
+    ...requests.filter((request) => request.assigneeId === user.id).map((request) => ({
+      id: request.id,
+      kind: 'part_request' as const,
+      title: request.item,
+      sourceSubteam: request.requesterSubteam || request.subteam,
+      status: request.status,
+      communication: request.communication,
+      nextFollowUpAt: request.nextFollowUpAt || '',
+    })),
+    ...leads.filter((lead) => lead.assigneeId === user.id).map((lead) => ({
+      id: lead.id,
+      kind: 'sponsor_lead' as const,
+      title: lead.company,
+      sourceSubteam: lead.requesterSubteam || lead.subteam || 'Business',
+      status: lead.status,
+      nextFollowUpAt: lead.nextFollowUpAt || '',
+    })),
+  ]
+  const availableTasks: MemberTask[] = [
+    ...requests.filter((request) => !request.assigneeId && isActiveRequest(request)
+      && (isBusiness || (request.requesterSubteam || request.subteam).trim().toLowerCase() === user.subteam.trim().toLowerCase()))
+      .map((request) => ({
+        id: request.id,
+        kind: 'part_request' as const,
+        title: request.item,
+        sourceSubteam: request.requesterSubteam || request.subteam,
+        status: request.status,
+        communication: request.communication,
+        nextFollowUpAt: request.nextFollowUpAt || '',
+      })),
+    ...leads.filter((lead) => !lead.assigneeId && isActiveLead(lead)
+      && (isBusiness || (lead.requesterSubteam || lead.subteam).trim().toLowerCase() === user.subteam.trim().toLowerCase()))
+      .map((lead) => ({
+        id: lead.id,
+        kind: 'sponsor_lead' as const,
+        title: lead.company,
+        sourceSubteam: lead.requesterSubteam || lead.subteam || 'Business',
+        status: lead.status,
+        nextFollowUpAt: lead.nextFollowUpAt || '',
+      })),
+  ]
+
+  const renderTask = (task: MemberTask, canClaim: boolean) => <article className="member-task-row" key={`${task.kind}-${task.id}`}>
+    <div className="member-task-main">
+      <strong>{task.title}</strong>
+      <span>{task.kind === 'part_request' ? 'Part request' : 'Sponsor lead'} · Posted by {task.sourceSubteam}</span>
+    </div>
+    {canClaim
+      ? <button className="button secondary member-task-claim" type="button" onClick={() => onClaim(task.kind, task.id)}>Claim task</button>
+      : <div className="member-task-controls">
+        <label><span>Status</span><select className="inline-select" aria-label={`Status for ${task.title}`} value={task.status} onChange={(event) => task.kind === 'part_request'
+          ? onRequestUpdate(task.id, 'status', event.target.value)
+          : onLeadStatusChange(task.id, event.target.value as SponsorLeadStatus)}>
+          {(task.kind === 'part_request'
+            ? ['Needed', 'Outreach', 'In transit', 'Received', 'Closed']
+            : ['New', 'Following up', 'Contacted', 'Converted', 'Not pursuing']).map((status) => <option key={status}>{status}</option>)}
+        </select></label>
+        {task.kind === 'part_request' && <label><span>Communication</span><select className="inline-select" aria-label={`Communication status for ${task.title}`} value={task.communication} onChange={(event) => onRequestUpdate(task.id, 'communication', event.target.value)}>
+          <option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option>
+        </select></label>}
+        <label><span>Next follow-up</span><input type="date" aria-label={`Next follow-up date for ${task.title}`} value={task.nextFollowUpAt} onChange={(event) => task.kind === 'part_request'
+          ? onRequestUpdate(task.id, 'nextFollowUpAt', event.target.value)
+          : onLeadFollowUpChange(task.id, event.target.value)} /></label>
+      </div>}
+  </article>
+
+  return <div className="member-task-overview">
+    <section className="section-block member-task-section">
+      <div className="section-heading"><div><span className="section-kicker">YOUR WORK</span><h2>Assigned to me</h2></div><span className="member-task-count">{assignedTasks.length}</span></div>
+      <p className="member-task-help">Update each task as you make progress. Changes are recorded in the task activity.</p>
+      {assignedTasks.length ? <div className="member-task-list">{assignedTasks.map((task) => renderTask(task, false))}</div> : <p className="member-task-empty">You do not have any assigned tasks yet.</p>}
+    </section>
+    <section className="section-block member-task-section">
+      <div className="section-heading"><div><span className="section-kicker">AVAILABLE WORK</span><h2>Tasks you can claim</h2></div><span className="member-task-count">{availableTasks.length}</span></div>
+      <p className="member-task-help">{isBusiness ? 'As a Business member, you can claim any unassigned task.' : `You can claim unassigned tasks posted by ${user.subteam}.`}</p>
+      {availableTasks.length ? <div className="member-task-list">{availableTasks.map((task) => renderTask(task, true))}</div> : <p className="member-task-empty">There are no unassigned tasks available to you right now.</p>}
+    </section>
+  </div>
 }
 
 function AccountSettings({ user, subteamRequests, onSave, onRequestSubteamChange, onReviewSubteamChange, onCancelSubteamChange, onDelete }: {
@@ -781,6 +884,7 @@ function App() {
   const [subteamFilter, setSubteamFilter] = useState('')
   const [requestSort, setRequestSort] = useState<'newest' | 'urgency'>('newest')
   const [leadStatusFilter, setLeadStatusFilter] = useState('All lead statuses')
+  const workspaceRefreshInProgress = useRef(false)
 
   useEffect(() => {
     let active = true
@@ -809,15 +913,7 @@ function App() {
     return () => { active = false }
   }, [])
 
-  useEffect(() => {
-    if (!user || user.tag === 'dev' || user.subteam.trim().toLowerCase() !== 'exec') return
-    const interval = window.setInterval(() => {
-      void getSubteamChangeRequests().then(setSubteamRequests).catch(() => undefined)
-    }, 30_000)
-    return () => window.clearInterval(interval)
-  }, [user])
-
-  const refreshWorkspace = async (includeManagement = user?.tag === 'dev') => {
+  const refreshWorkspace = useCallback(async (includeManagement = user?.tag === 'dev') => {
     const [savedRequests, savedSponsors, savedLeads, savedMembers, savedSubteamRequests] = await Promise.all([
       getRequests(), getSponsors(), getSponsorLeads(), getTeamMembers(), getSubteamChangeRequests(),
     ])
@@ -828,7 +924,35 @@ function App() {
     setTeamMembers(savedMembers)
     setSubteamRequests(savedSubteamRequests)
     setManagementUsers(savedManagementUsers)
-  }
+  }, [user?.tag])
+
+  useEffect(() => {
+    if (!user) return
+    let active = true
+    const refreshVisibleWorkspace = async () => {
+      if (!active || document.visibilityState === 'hidden' || workspaceRefreshInProgress.current) return
+      workspaceRefreshInProgress.current = true
+      try {
+        await refreshWorkspace(user.tag === 'dev' && view === 'management')
+      } catch (error) {
+        if (active) setActionError(error instanceof Error ? error.message : 'Could not refresh shared team records.')
+      } finally {
+        workspaceRefreshInProgress.current = false
+      }
+    }
+    const interval = window.setInterval(() => void refreshVisibleWorkspace(), 15_000)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refreshVisibleWorkspace()
+    }
+    window.addEventListener('focus', refreshVisibleWorkspace)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+      window.removeEventListener('focus', refreshVisibleWorkspace)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [refreshWorkspace, user, view])
 
   const authenticate = async (values: AuthValues) => {
     const nextUser = values.mode === 'signin'
@@ -1214,8 +1338,8 @@ function App() {
       setActionError(error instanceof Error ? error.message : 'Could not delete this sponsor lead.')
     }
   }
-  const pageTitle = view === 'overview' ? 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : view === 'management' ? 'Management' : 'Account'
-  const pageDescription = view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Requests submitted by subteams, from first ask to received.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
+  const pageTitle = view === 'overview' ? user?.tag === 'member' ? 'My tasks' : 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : view === 'management' ? 'Management' : 'Account'
+  const pageDescription = view === 'overview' ? user?.tag === 'member' ? 'See your assignments, claim eligible work, and keep task progress up to date.' : 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Requests submitted by subteams, from first ask to received.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
   if (!authReady) return <main className="auth-shell"><div className="auth-panel auth-loading"><img className="auth-logo" src="https://Digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" /><p>Connecting to the team workspace...</p></div></main>
   if (!user) return <AuthScreen onAuthenticate={authenticate} onResetPassword={finishPasswordReset} onRequestPasswordReset={requestPasswordReset} initialError={authError} />
   const pendingSubteamRequestCount = subteamRequests.filter((request) => request.status === 'pending' && request.userId !== user.id).length
@@ -1230,7 +1354,7 @@ function App() {
         </a>
         <div className="nav-label">WORKSPACE</div>
         <nav className="main-nav" aria-label="Main navigation">
-          <button className={view === 'overview' ? 'nav-item active' : 'nav-item'} onClick={() => setView('overview')}><ClipboardList size={18} /> Overview</button>
+          <button className={view === 'overview' ? 'nav-item active' : 'nav-item'} onClick={() => setView('overview')}><ClipboardList size={18} /> {user.tag === 'member' ? 'My tasks' : 'Overview'}</button>
           <button className={view === 'parts' ? 'nav-item active' : 'nav-item'} onClick={() => setView('parts')}><Box size={18} /> Part requests <span className="nav-count">{openRequests.length}</span></button>
           <button className={view === 'sponsor-leads' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsor-leads')}><ContactRound size={18} /> Sponsor leads <span className="nav-count">{openSponsorLeadCount}</span></button>
           <button className={view === 'sponsors' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsors')}><Handshake size={18} /> Sponsorships</button>
@@ -1293,7 +1417,18 @@ function App() {
             onBulkLeadUpdate={bulkUpdateLeads}
           />}
 
-          {view === 'overview' && <>
+          {view === 'overview' && (user.tag === 'member' ? <MemberTaskOverview
+            user={user}
+            requests={requests}
+            leads={sponsorLeads}
+            onClaim={(kind, id) => {
+              if (kind === 'part_request') void updateRequestAssignee(id, user.id)
+              else void updateSponsorLeadAssignee(id, user.id)
+            }}
+            onRequestUpdate={(id, field, value) => void updateRequest(id, field, value)}
+            onLeadStatusChange={(id, status) => void updateSponsorLeadStatus(id, status)}
+            onLeadFollowUpChange={(id, date) => void updateSponsorLeadFollowUp(id, date)}
+          /> : <>
             <section className="metrics" aria-label="Workspace summary">
               <article className="metric"><div className="metric-top"><span>OPEN PART REQUESTS</span><Box size={17} /></div><strong>{openRequests.length}</strong><small>{requests.filter((request) => request.priority === 'Urgent' && !['Received', 'Closed'].includes(request.status)).length} urgent needs</small></article>
               <article className="metric"><div className="metric-top"><span>IN SELLER OUTREACH</span><ArrowUpRight size={17} /></div><strong>{requests.filter((request) => request.communication !== 'Not started' && request.communication !== 'Confirmed').length}</strong><small>Requests with active contact</small></article>
@@ -1356,7 +1491,7 @@ function App() {
                 <button className="add-sponsor-link" onClick={() => setSponsorModal('sponsor')}><Plus size={16} /> Add sponsorship record</button>
               </section>
             </div>
-          </>}
+          </>)}
 
           {view === 'parts' && <section className="section-block data-section">
             <div className="table-toolbar">

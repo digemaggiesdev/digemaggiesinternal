@@ -287,12 +287,24 @@ async function assigneeAuthorizationError(database, user, assigneeId, requesterS
       : { error: 'Choose a member from your subteam.', status: 400 }
   }
   if (assigneeId === user.id) {
+    if (currentAssigneeId && currentAssigneeId !== user.id) {
+      return { error: 'This task has already been claimed by another member.', status: 403 }
+    }
     return await isEligibleAssignee(database, user.id, requesterSubteam)
       ? null
       : { error: 'Only Business members or members of the originating subteam can assign themselves.', status: 403 }
   }
   if (!assigneeId && currentAssigneeId === user.id) return null
   return { error: 'Only Exec members can assign a task to another person.', status: 403 }
+}
+
+function canMemberUpdateTask(user, changes, record, editableFields) {
+  if (user.tag !== 'member' || !Object.keys(changes).every((field) => editableFields.has(field) || field === 'assigneeId')) return false
+  if (Object.hasOwn(changes, 'assigneeId') && !['', user.id].includes(changes.assigneeId)) return false
+  if (record.assigneeId === user.id) return true
+  return !record.assigneeId
+    && Object.keys(changes).length === 1
+    && changes.assigneeId === user.id
 }
 
 async function sendAssignmentNotification(database, environment, actor, assigneeId, previousAssigneeId, taskType, taskTitle, nextFollowUpAt) {
@@ -847,12 +859,28 @@ export function createApiHandler(database, environment = process.env) {
       if (requestId && method === 'PATCH') {
         const parsed = await parseBody(request, partRequestPatchSchema)
         if (parsed.response) return parsed.response
+        let existingRequest
+        let previousRequest
+        const memberChange = session.user.tag === 'member'
+        if (memberChange) {
+          [existingRequest] = await database.sql`SELECT data FROM records WHERE id = ${requestId} AND kind = 'part_request'`
+          if (!existingRequest) return jsonError('Part request not found.', 404)
+          previousRequest = existingRequest.data
+        }
         const followUpOnly = Object.keys(parsed.data).every((field) => field === 'nextFollowUpAt')
-        if (!canEditSharedRecords(session.user) && !(canDelegate(session.user) && followUpOnly)) {
+        const memberAllowed = memberChange && canMemberUpdateTask(
+          session.user,
+          parsed.data,
+          previousRequest,
+          new Set(['status', 'communication', 'nextFollowUpAt']),
+        )
+        if (!canEditSharedRecords(session.user) && !memberAllowed && !(canDelegate(session.user) && followUpOnly)) {
           return jsonError('STL or Dev access is required to edit shared records. Exec may update follow-up dates.', 403)
         }
         if (Object.hasOwn(parsed.data, 'assigneeId')) {
-          const [existing] = await database.sql`SELECT data FROM records WHERE id = ${requestId} AND kind = 'part_request'`
+          const [existing] = existingRequest
+            ? [existingRequest]
+            : await database.sql`SELECT data FROM records WHERE id = ${requestId} AND kind = 'part_request'`
           if (!existing) return jsonError('Part request not found.', 404)
           const sourceSubteam = existing.data.requesterSubteam || existing.data.subteam || ''
           const assignmentError = await assigneeAuthorizationError(database, session.user, parsed.data.assigneeId, sourceSubteam, existing.data.assigneeId)
@@ -938,12 +966,28 @@ export function createApiHandler(database, environment = process.env) {
       if (sponsorLeadId && method === 'PATCH') {
         const parsed = await parseBody(request, sponsorLeadPatchSchema)
         if (parsed.response) return parsed.response
+        let existingLead
+        let previousLead
+        const memberChange = session.user.tag === 'member'
+        if (memberChange) {
+          [existingLead] = await database.sql`SELECT data FROM sponsor_leads WHERE id = ${sponsorLeadId}`
+          if (!existingLead) return jsonError('Sponsor lead not found.', 404)
+          previousLead = existingLead.data
+        }
         const followUpOnly = Object.keys(parsed.data).every((field) => field === 'nextFollowUpAt')
-        if (!canEditSharedRecords(session.user) && !(canDelegate(session.user) && followUpOnly)) {
+        const memberAllowed = memberChange && canMemberUpdateTask(
+          session.user,
+          parsed.data,
+          previousLead,
+          new Set(['status', 'nextFollowUpAt']),
+        )
+        if (!canEditSharedRecords(session.user) && !memberAllowed && !(canDelegate(session.user) && followUpOnly)) {
           return jsonError('STL or Dev access is required to edit shared records. Exec may update follow-up dates.', 403)
         }
         if (Object.hasOwn(parsed.data, 'assigneeId')) {
-          const [existing] = await database.sql`SELECT data FROM sponsor_leads WHERE id = ${sponsorLeadId}`
+          const [existing] = existingLead
+            ? [existingLead]
+            : await database.sql`SELECT data FROM sponsor_leads WHERE id = ${sponsorLeadId}`
           if (!existing) return jsonError('Sponsor lead not found.', 404)
           const sourceSubteam = existing.data.requesterSubteam || existing.data.subteam || ''
           const assignmentError = await assigneeAuthorizationError(database, session.user, parsed.data.assigneeId, sourceSubteam, existing.data.assigneeId)

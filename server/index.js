@@ -301,14 +301,24 @@ function authorizeAssignee(res, user, assigneeId, requesterSubteam, currentAssig
   }
   if (user.tag === 'stl') return validateAssigneeSubteam(res, assigneeId, user.subteam)
   const subteam = user.subteam.trim().toLowerCase()
-  if (assigneeId === user.id && (subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase())) return true
+  if (assigneeId === user.id && (!currentAssigneeId || currentAssigneeId === user.id)
+    && (subteam === 'business' || subteam === requesterSubteam.trim().toLowerCase())) return true
   if (!assigneeId && currentAssigneeId === user.id) return true
   res.status(403).json({
     error: assigneeId === user.id
-      ? 'Only Business members or members of the originating subteam can assign themselves.'
+      ? 'Only unassigned tasks from your subteam, or any unassigned task for Business members, can be claimed.'
       : 'Only Exec members can assign a task to another person.',
   })
   return false
+}
+
+function canMemberUpdateTask(user, changes, record, editableFields) {
+  if (user.tag !== 'member' || !Object.keys(changes).every((field) => editableFields.has(field) || field === 'assigneeId')) return false
+  if (Object.hasOwn(changes, 'assigneeId') && !['', user.id].includes(changes.assigneeId)) return false
+  if (record.assigneeId === user.id) return true
+  return !record.assigneeId
+    && Object.keys(changes).length === 1
+    && changes.assigneeId === user.id
 }
 
 async function sendAssignmentNotification(res, actor, assigneeId, previousAssigneeId, taskType, taskTitle, nextFollowUpAt) {
@@ -692,16 +702,30 @@ app.post('/api/requests', requireAuth, (req, res) => {
 app.patch('/api/requests/:id', requireAuth, async (req, res) => {
   const input = parseBody(partRequestPatchSchema, req, res)
   if (!input) return
+  let existingRecord
+  let previous
+  const memberChange = req.user.tag === 'member'
+  if (memberChange) {
+    existingRecord = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(req.params.id, 'part_request')
+    if (!existingRecord) return res.status(404).json({ error: 'Part request not found.' })
+    previous = JSON.parse(existingRecord.data)
+  }
   const followUpOnly = Object.keys(input).every((key) => key === 'nextFollowUpAt')
-  if (!canEditSharedRecords(req.user) && !(canDelegate(req.user) && followUpOnly)) {
+  const memberAllowed = memberChange && canMemberUpdateTask(
+    req.user,
+    input,
+    previous,
+    new Set(['status', 'communication', 'nextFollowUpAt']),
+  )
+  if (!canEditSharedRecords(req.user) && !memberAllowed && !(canDelegate(req.user) && followUpOnly)) {
     return res.status(403).json({ error: 'STL or Dev access is required to edit shared records. Exec may update follow-up dates.' })
   }
   if (Object.hasOwn(input, 'assigneeId')) {
-    const existing = db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(req.params.id, 'part_request')
+    const existing = existingRecord || db.prepare('SELECT data FROM records WHERE id = ? AND kind = ?').get(req.params.id, 'part_request')
     if (!existing) return res.status(404).json({ error: 'Part request not found.' })
-    const record = JSON.parse(existing.data)
-    if (!authorizeAssignee(res, req.user, input.assigneeId, record.requesterSubteam || record.subteam, record.assigneeId)) return
-    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, record.assigneeId, 'Part request', input.item || record.item, input.nextFollowUpAt ?? record.nextFollowUpAt)) return
+    previous ||= JSON.parse(existing.data)
+    if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || previous.subteam, previous.assigneeId)) return
+    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Part request', input.item || previous.item, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
   }
   const record = updateRecord('part_request', req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Part request not found.' })
@@ -766,15 +790,29 @@ app.patch('/api/sponsor-leads/:id', requireAuth, async (req, res) => {
   const input = parseBody(sponsorLeadPatchSchema, req, res)
   if (!input) return
   const followUpOnly = Object.keys(input).every((key) => key === 'nextFollowUpAt')
-  if (!canEditSharedRecords(req.user) && !(canDelegate(req.user) && followUpOnly)) {
+  let existing
+  let previous
+  const memberChange = req.user.tag === 'member'
+  if (memberChange) {
+    existing = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(req.params.id)
+    if (!existing) return res.status(404).json({ error: 'Sponsor lead not found.' })
+    previous = JSON.parse(existing.data)
+  }
+  const memberAllowed = memberChange && canMemberUpdateTask(
+    req.user,
+    input,
+    previous,
+    new Set(['status', 'nextFollowUpAt']),
+  )
+  if (!canEditSharedRecords(req.user) && !memberAllowed && !(canDelegate(req.user) && followUpOnly)) {
     return res.status(403).json({ error: 'STL or Dev access is required to edit shared records. Exec may update follow-up dates.' })
   }
   if (Object.hasOwn(input, 'assigneeId')) {
-    const existing = db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(req.params.id)
+    existing ||= db.prepare('SELECT data FROM sponsor_leads WHERE id = ?').get(req.params.id)
     if (!existing) return res.status(404).json({ error: 'Sponsor lead not found.' })
-    const record = JSON.parse(existing.data)
-    if (!authorizeAssignee(res, req.user, input.assigneeId, record.requesterSubteam || record.subteam || '', record.assigneeId)) return
-    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, record.assigneeId, 'Sponsor lead', input.company || record.company, input.nextFollowUpAt ?? record.nextFollowUpAt)) return
+    previous ||= JSON.parse(existing.data)
+    if (!authorizeAssignee(res, req.user, input.assigneeId, previous.requesterSubteam || previous.subteam || '', previous.assigneeId)) return
+    if (!await sendAssignmentNotification(res, req.user, input.assigneeId, previous.assigneeId, 'Sponsor lead', input.company || previous.company, input.nextFollowUpAt ?? previous.nextFollowUpAt)) return
   }
   const record = updateSponsorLead(req.params.id, input, req.user.displayName)
   if (!record) return res.status(404).json({ error: 'Sponsor lead not found.' })

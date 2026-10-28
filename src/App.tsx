@@ -247,17 +247,22 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
   label: string
   onChange: (assigneeId: string) => void
 }) {
-  const canEdit = user?.tag === 'dev' || user?.tag === 'stl'
   const userSubteam = user?.subteam.trim().toLowerCase() || ''
   const sourceSubteam = requesterSubteam.trim().toLowerCase()
   const activeMembers = members.filter((member) => member.active)
+  const canClaim = user?.tag === 'member'
+    && !assignedId
+    && (userSubteam === 'business' || userSubteam === sourceSubteam)
+  const canEdit = user?.tag === 'dev' || user?.tag === 'stl' || canClaim
   const visibleMembers = user?.tag === 'dev'
     ? activeMembers
     : user?.tag === 'stl' && userSubteam === 'exec'
       ? activeMembers.filter((member) => member.id === user.id || ['business', sourceSubteam].includes(member.subteam.trim().toLowerCase()))
       : user?.tag === 'stl'
         ? activeMembers.filter((member) => member.subteam.trim().toLowerCase() === userSubteam)
-        : activeMembers
+        : canClaim
+          ? activeMembers.filter((member) => member.id === user?.id)
+          : []
   const currentAssignee = members.find((member) => member.id === assignedId)
   const currentAssigneeLabel = currentAssignee
     ? `${currentAssignee.displayName} · ${currentAssignee.subteam}${currentAssignee.active ? '' : ' (inactive)'}`
@@ -270,8 +275,8 @@ function AssignmentSelect({ assignedId, user, members, requesterSubteam, label, 
     disabled={!canEdit}
     onChange={(event) => onChange(event.target.value)}
   >
-    <option value="">{canEdit ? 'Unassigned' : currentAssigneeLabel}</option>
-    {visibleMembers.map((member) => <option key={member.id} value={member.id}>{member.displayName} · {member.subteam}{member.id === user?.id ? ' (You)' : ''}</option>)}
+    <option value="">{canClaim ? 'Unassigned' : (user?.tag === 'dev' || user?.tag === 'stl') ? 'Unassigned' : currentAssigneeLabel}</option>
+    {visibleMembers.map((member) => <option key={member.id} value={member.id}>{canClaim && member.id === user?.id ? 'Claim this task' : `${member.displayName} · ${member.subteam}${member.id === user?.id ? ' (You)' : ''}`}</option>)}
     {assignedId && !visibleMembers.some((member) => member.id === assignedId) && <option value={assignedId} disabled>{currentAssigneeLabel}</option>}
   </select>
 }

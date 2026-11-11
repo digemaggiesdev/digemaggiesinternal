@@ -76,7 +76,7 @@ import type {
 } from './api'
 import './App.css'
 
-type View = 'overview' | 'parts' | 'sponsors' | 'sponsor-leads' | 'account' | 'management'
+type View = 'overview' | 'my-tasks' | 'parts' | 'sponsors' | 'sponsor-leads' | 'account' | 'management'
 type ManagementEdit =
   | { kind: 'user'; user: TeamUser }
   | { kind: 'request'; record: PartRequest }
@@ -292,11 +292,13 @@ type MemberTask = {
   nextFollowUpAt: string
 }
 
-function MemberTaskOverview({ user, requests, leads, onClaim, onRequestUpdate, onLeadStatusChange, onLeadFollowUpChange }: {
+function MemberTaskOverview({ user, requests, leads, showClaimableTasks, onClaim, onOpen, onRequestUpdate, onLeadStatusChange, onLeadFollowUpChange }: {
   user: TeamUser
   requests: PartRequest[]
   leads: SponsorLead[]
+  showClaimableTasks: boolean
   onClaim: (kind: MemberTask['kind'], id: string) => void
+  onOpen: (task: MemberTask) => void
   onRequestUpdate: (id: string, field: 'status' | 'communication' | 'nextFollowUpAt', value: string) => void
   onLeadStatusChange: (id: string, status: SponsorLeadStatus) => void
   onLeadFollowUpChange: (id: string, date: string) => void
@@ -304,6 +306,7 @@ function MemberTaskOverview({ user, requests, leads, onClaim, onRequestUpdate, o
   const isBusiness = user.subteam.trim().toLowerCase() === 'business'
   const isActiveRequest = (request: PartRequest) => !['Received', 'Closed'].includes(request.status)
   const isActiveLead = (lead: SponsorLead) => !['Converted', 'Not pursuing'].includes(lead.status)
+  const [showCompletedTasks, setShowCompletedTasks] = useState(false)
   const assignedTasks: MemberTask[] = [
     ...requests.filter((request) => request.assigneeId === user.id).map((request) => ({
       id: request.id,
@@ -346,11 +349,17 @@ function MemberTaskOverview({ user, requests, leads, onClaim, onRequestUpdate, o
         nextFollowUpAt: lead.nextFollowUpAt || '',
       })),
   ]
+  const activeAssignedTasks = assignedTasks.filter((task) => task.kind === 'part_request'
+    ? !['Received', 'Closed'].includes(task.status)
+    : !['Converted', 'Not pursuing'].includes(task.status))
+  const completedAssignedTasks = assignedTasks.filter((task) => !activeAssignedTasks.includes(task))
 
   const renderTask = (task: MemberTask, canClaim: boolean) => <article className="member-task-row" key={`${task.kind}-${task.id}`}>
     <div className="member-task-main">
-      <strong>{task.title}</strong>
-      <span>{task.kind === 'part_request' ? 'Part request' : 'Sponsor lead'} · Posted by {task.sourceSubteam}</span>
+      <button type="button" className="member-task-open" onClick={() => onOpen(task)} aria-label={`Open ${task.kind === 'part_request' ? 'product details for' : 'details for'} ${task.title}`}>
+        <strong>{task.title}</strong>
+        <span>{task.kind === 'part_request' ? 'Part request' : 'Sponsor lead'} · Posted by {task.sourceSubteam} <ArrowUpRight size={12} /></span>
+      </button>
     </div>
     {canClaim
       ? <button className="button secondary member-task-claim" type="button" onClick={() => onClaim(task.kind, task.id)}>Claim task</button>
@@ -373,15 +382,19 @@ function MemberTaskOverview({ user, requests, leads, onClaim, onRequestUpdate, o
 
   return <div className="member-task-overview">
     <section className="section-block member-task-section">
-      <div className="section-heading"><div><span className="section-kicker">YOUR WORK</span><h2>Assigned to me</h2></div><span className="member-task-count">{assignedTasks.length}</span></div>
-      <p className="member-task-help">Update each task as you make progress. Changes are recorded in the task activity.</p>
-      {assignedTasks.length ? <div className="member-task-list">{assignedTasks.map((task) => renderTask(task, false))}</div> : <p className="member-task-empty">You do not have any assigned tasks yet.</p>}
+      <div className="section-heading"><div><span className="section-kicker">YOUR WORK</span><h2>Assigned to me</h2></div><div className="member-task-heading-actions">
+        <span className="member-task-count">{activeAssignedTasks.length}</span>
+        {completedAssignedTasks.length > 0 && <label className="completed-task-toggle"><input type="checkbox" checked={showCompletedTasks} onChange={(event) => setShowCompletedTasks(event.target.checked)} /> Show completed ({completedAssignedTasks.length})</label>}
+      </div></div>
+      <p className="member-task-help">Open a task to review its product details, specifications, and links. Changes are recorded in the task activity.</p>
+      {activeAssignedTasks.length ? <div className="member-task-list">{activeAssignedTasks.map((task) => renderTask(task, false))}</div> : <p className="member-task-empty">You do not have any active assigned tasks.</p>}
+      {showCompletedTasks && completedAssignedTasks.length > 0 && <><p className="completed-task-label">Completed tasks</p><div className="member-task-list completed-task-list" aria-label="Completed tasks">{completedAssignedTasks.map((task) => renderTask(task, false))}</div></>}
     </section>
-    <section className="section-block member-task-section">
+    {showClaimableTasks && <section className="section-block member-task-section">
       <div className="section-heading"><div><span className="section-kicker">AVAILABLE WORK</span><h2>Tasks you can claim</h2></div><span className="member-task-count">{availableTasks.length}</span></div>
       <p className="member-task-help">{isBusiness ? 'As a Business member, you can claim any unassigned task.' : `You can claim unassigned tasks posted by ${user.subteam}.`}</p>
       {availableTasks.length ? <div className="member-task-list">{availableTasks.map((task) => renderTask(task, true))}</div> : <p className="member-task-empty">There are no unassigned tasks available to you right now.</p>}
-    </section>
+    </section>}
   </div>
 }
 
@@ -887,6 +900,7 @@ function App() {
   const [managementEdit, setManagementEdit] = useState<ManagementEdit | null>(null)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('All statuses')
+  const [requestFolder, setRequestFolder] = useState<'active' | 'closed'>('active')
   const [subteamFilter, setSubteamFilter] = useState('')
   const [requestSort, setRequestSort] = useState<'newest' | 'urgency'>('newest')
   const [leadStatusFilter, setLeadStatusFilter] = useState('All lead statuses')
@@ -1162,7 +1176,10 @@ function App() {
   const activeValue = sponsors.filter((sponsor) => sponsor.status === 'Committed' || sponsor.status === 'Received').reduce((sum, sponsor) => sum + sponsor.amount, 0)
   const requestSubteams = [...new Set([...subteamOptions, ...requests.map((request) => request.subteam.trim()).filter(Boolean)])]
     .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
-  const filteredRequests = requests.filter((request) => {
+  const folderRequests = requests.filter((request) => requestFolder === 'closed'
+    ? ['Received', 'Closed'].includes(request.status)
+    : !['Received', 'Closed'].includes(request.status))
+  const filteredRequests = folderRequests.filter((request) => {
     const matchesQuery = `${request.item} ${request.company} ${request.subteam} ${request.requestedBy}`.toLowerCase().includes(query.toLowerCase())
     const matchesSubteam = !subteamFilter || request.subteam.trim().toLowerCase() === subteamFilter.toLowerCase()
     return matchesQuery && matchesSubteam && (statusFilter === 'All statuses' || request.status === statusFilter)
@@ -1375,8 +1392,8 @@ function App() {
       setActionError(error instanceof Error ? error.message : 'Could not delete this sponsor lead.')
     }
   }
-  const pageTitle = view === 'overview' ? user?.tag === 'member' ? 'My tasks' : 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : view === 'management' ? 'Management' : 'Account'
-  const pageDescription = view === 'overview' ? user?.tag === 'member' ? 'See your assignments, claim eligible work, and keep task progress up to date.' : 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Requests submitted by subteams, from first ask to received.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
+  const pageTitle = view === 'my-tasks' || view === 'overview' && user?.tag === 'member' ? 'My tasks' : view === 'overview' ? 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : view === 'management' ? 'Management' : 'Account'
+  const pageDescription = view === 'my-tasks' ? 'Review assigned tasks, open product details, and show completed tasks when needed.' : view === 'overview' && user?.tag === 'member' ? 'See your assignments, claim eligible work, and keep task progress up to date.' : view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Review active requests or find completed requests in their own folder.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
   if (!authReady) return <main className="auth-shell"><div className="auth-panel auth-loading"><img className="auth-logo" src="https://Digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" /><p>Connecting to the team workspace...</p></div></main>
   if (!user) return <AuthScreen onAuthenticate={authenticate} onResetPassword={finishPasswordReset} onRequestPasswordReset={requestPasswordReset} initialError={authError} />
   const pendingSubteamRequestCount = subteamRequests.filter((request) => request.status === 'pending' && request.userId !== user.id).length
@@ -1392,6 +1409,7 @@ function App() {
         <div className="nav-label">WORKSPACE</div>
         <nav className="main-nav" aria-label="Main navigation">
           <button className={view === 'overview' ? 'nav-item active' : 'nav-item'} onClick={() => setView('overview')}><ClipboardList size={18} /> {user.tag === 'member' ? 'My tasks' : 'Overview'}</button>
+          {(user.tag === 'dev' || user.subteam.trim().toLowerCase() === 'exec') && <button className={view === 'my-tasks' ? 'nav-item active' : 'nav-item'} onClick={() => setView('my-tasks')}><ClipboardList size={18} /> My tasks</button>}
           <button className={view === 'parts' ? 'nav-item active' : 'nav-item'} onClick={() => setView('parts')}><Box size={18} /> Part requests <span className="nav-count">{openRequests.length}</span></button>
           <button className={view === 'sponsor-leads' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsor-leads')}><ContactRound size={18} /> Sponsor leads <span className="nav-count">{openSponsorLeadCount}</span></button>
           <button className={view === 'sponsors' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsors')}><Handshake size={18} /> Sponsorships</button>
@@ -1423,7 +1441,7 @@ function App() {
               {view === 'sponsors' && <button className="button secondary" onClick={() => setSponsorModal('sponsor')}><Plus size={17} /> Add sponsor</button>}
               {view === 'sponsor-leads' && <button className="button primary" onClick={() => setModal('lead')}><Plus size={18} /> Submit sponsor lead</button>}
               {view === 'overview' && <button className="button secondary" onClick={() => setModal('lead')}><Plus size={17} /> Sponsor lead</button>}
-              {view !== 'sponsor-leads' && view !== 'account' && view !== 'management' && <button className="button primary" onClick={() => setModal('request')}><Plus size={18} /> New request</button>}
+              {view !== 'sponsor-leads' && view !== 'my-tasks' && view !== 'account' && view !== 'management' && <button className="button primary" onClick={() => setModal('request')}><Plus size={18} /> New request</button>}
             </div>
           </section>
           {actionError && <div className="action-error" role="alert">{actionError}</div>}
@@ -1454,18 +1472,29 @@ function App() {
             onBulkLeadUpdate={bulkUpdateLeads}
           />}
 
-          {view === 'overview' && (user.tag === 'member' ? <MemberTaskOverview
+          {(view === 'my-tasks' || view === 'overview' && user.tag === 'member') && <MemberTaskOverview
             user={user}
             requests={requests}
             leads={sponsorLeads}
+            showClaimableTasks={user.tag === 'member'}
             onClaim={(kind, id) => {
               if (kind === 'part_request') void updateRequestAssignee(id, user.id)
               else void updateSponsorLeadAssignee(id, user.id)
             }}
+            onOpen={(task) => {
+              if (task.kind === 'part_request') {
+                setSelectedRequestId(task.id)
+                setModal('part-detail')
+              } else {
+                setSelectedLeadId(task.id)
+                setModal('lead-detail')
+              }
+            }}
             onRequestUpdate={(id, field, value) => void updateRequest(id, field, value)}
             onLeadStatusChange={(id, status) => void updateSponsorLeadStatus(id, status)}
             onLeadFollowUpChange={(id, date) => void updateSponsorLeadFollowUp(id, date)}
-          /> : <>
+          />}
+          {view === 'overview' && user.tag !== 'member' && <>
             <section className="metrics" aria-label="Workspace summary">
               <article className="metric"><div className="metric-top"><span>OPEN PART REQUESTS</span><Box size={17} /></div><strong>{openRequests.length}</strong><small>{requests.filter((request) => request.priority === 'Urgent' && !['Received', 'Closed'].includes(request.status)).length} urgent needs</small></article>
               <article className="metric"><div className="metric-top"><span>IN SELLER OUTREACH</span><ArrowUpRight size={17} /></div><strong>{requests.filter((request) => request.communication !== 'Not started' && request.communication !== 'Confirmed').length}</strong><small>Requests with active contact</small></article>
@@ -1528,13 +1557,21 @@ function App() {
                 <button className="add-sponsor-link" onClick={() => setSponsorModal('sponsor')}><Plus size={16} /> Add sponsorship record</button>
               </section>
             </div>
-          </>)}
+          </>}
 
           {view === 'parts' && <section className="section-block data-section">
+            <div className="request-folders" role="group" aria-label="Part request folders">
+              <button type="button" className={requestFolder === 'active' ? 'request-folder active' : 'request-folder'} aria-pressed={requestFolder === 'active'} onClick={() => { setRequestFolder('active'); setStatusFilter('All statuses') }}>
+                Active requests <span>{requests.filter((request) => !['Received', 'Closed'].includes(request.status)).length}</span>
+              </button>
+              <button type="button" className={requestFolder === 'closed' ? 'request-folder active' : 'request-folder'} aria-pressed={requestFolder === 'closed'} onClick={() => { setRequestFolder('closed'); setStatusFilter('All statuses') }}>
+                Closed requests <span>{requests.filter((request) => ['Received', 'Closed'].includes(request.status)).length}</span>
+              </button>
+            </div>
             <div className="table-toolbar">
               <div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search item, company, subteam..." aria-label="Search part requests" /></div>
               <div className="table-toolbar-controls">
-                <label className="select-control"><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select><ChevronDown size={15} /></label>
+                <label className="select-control"><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option>{(requestFolder === 'active' ? ['Needed', 'Outreach', 'In transit'] : ['Received', 'Closed']).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={15} /></label>
                 <label className="select-control"><span className="sr-only">Filter by subteam</span><select value={subteamFilter} onChange={(event) => setSubteamFilter(event.target.value)}><option value="">All subteams</option>{requestSubteams.map((subteam) => <option key={subteam} value={subteam}>{subteam}</option>)}</select><ChevronDown size={15} /></label>
                 <label className="select-control"><span className="sr-only">Sort part requests</span><select value={requestSort} onChange={(event) => setRequestSort(event.target.value as 'newest' | 'urgency')}><option value="newest">Sort: newest</option><option value="urgency">Sort: urgency</option></select><ChevronDown size={15} /></label>
               </div>
@@ -1547,11 +1584,11 @@ function App() {
                 <td className="compat-cell" title={request.compatibility}>{request.compatibility || 'Not provided'}</td>
                 <td><select className="inline-select" aria-label={`Communication status for ${request.item}`} value={request.communication} disabled={!canEditSharedRecords} onChange={(event) => updateRequest(request.id, 'communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></td>
                 <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} disabled={!canEditSharedRecords} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></td>
-                <td className="amount-cell">{money(request.value)}</td><td className="row-actions">{canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${request.item}`} aria-label={`Edit part request for ${request.item}`} onClick={() => setManagementEdit({ kind: 'request', record: request })}><Pencil size={15} /></button><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></>}</td>
+                <td className="amount-cell">{money(request.value)}</td><td className="row-actions">{canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${request.item}`} aria-label={`Edit part request for ${request.item}`} onClick={() => setManagementEdit({ kind: 'request', record: request })}><Pencil size={15} /></button>{!['Received', 'Closed'].includes(request.status) && <button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button>}</>}</td>
               </tr>)}
               {filteredRequests.length === 0 && <tr><td colSpan={9} className="empty-table">No requests match this search.</td></tr>}
             </tbody></table></div>
-            <div className="table-footer">Showing {filteredRequests.length} of {requests.length} requests <span>Changes are shared with the team</span></div>
+            <div className="table-footer">Showing {filteredRequests.length} of {folderRequests.length} {requestFolder} requests <span>{requestFolder === 'closed' ? 'Closed requests are kept and can be reopened by changing their status.' : 'Changes are shared with the team'}</span></div>
           </section>}
 
           {view === 'sponsors' && <section className="section-block data-section">
@@ -1585,7 +1622,7 @@ function App() {
                   <AssignmentSelect assignedId={lead.assigneeId} user={user} members={teamMembers} requesterSubteam={lead.requesterSubteam || lead.subteam} label={`Assignment for sponsor lead ${lead.company}`} onChange={(assigneeId) => void updateSponsorLeadAssignee(lead.id, assigneeId)} />
                   <select className="inline-select lead-status-select" aria-label={`Follow-up status for ${lead.company}`} value={lead.status} disabled={!canEditSharedRecords} onChange={(event) => void updateSponsorLeadStatus(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select>
                   {canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${lead.company}`} aria-label={`Edit sponsor lead for ${lead.company}`} onClick={() => setManagementEdit({ kind: 'lead', record: lead })}><Pencil size={15} /></button>
-                  <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button></>}
+                  {!['Converted', 'Not pursuing'].includes(lead.status) && <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button>}</>}
                 </div>
               </article>)}
               {filteredSponsorLeads.length === 0 && <div className="empty-state lead-empty-state">No sponsor leads yet. Submit a business connection for follow-up.</div>}

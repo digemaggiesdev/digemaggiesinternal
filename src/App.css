@@ -100,6 +100,7 @@
 .member-task-open strong { color: #34493e; font: 650 13px var(--body); }
 .member-task-open:hover strong { color: #730f0f; text-decoration: underline; text-decoration-color: #d6af36; text-underline-offset: 3px; }
 .member-task-open span { display: inline-flex; align-items: center; gap: 4px; color: #78847c; font-size: 10px; }
+.member-task-open .member-task-company { color: #5e6d63; font-size: 10px; font-weight: 600; }
 .member-task-open span svg { color: #9b741d; }
 .member-task-controls { display: flex; flex-wrap: wrap; align-items: end; justify-content: flex-end; gap: 10px; }
 .member-task-controls label { display: grid; gap: 5px; color: #78847c; font-size: 9px; font-weight: 700; }

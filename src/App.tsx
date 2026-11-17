@@ -286,6 +286,7 @@ type MemberTask = {
   id: string
   kind: 'part_request' | 'sponsor_lead'
   title: string
+  company?: string
   sourceSubteam: string
   status: RequestStatus | SponsorLeadStatus
   communication?: CommunicationStatus
@@ -312,6 +313,7 @@ function MemberTaskOverview({ user, requests, leads, showClaimableTasks, onClaim
       id: request.id,
       kind: 'part_request' as const,
       title: request.item,
+      company: request.company,
       sourceSubteam: request.requesterSubteam || request.subteam,
       status: request.status,
       communication: request.communication,
@@ -333,6 +335,7 @@ function MemberTaskOverview({ user, requests, leads, showClaimableTasks, onClaim
         id: request.id,
         kind: 'part_request' as const,
         title: request.item,
+        company: request.company,
         sourceSubteam: request.requesterSubteam || request.subteam,
         status: request.status,
         communication: request.communication,
@@ -358,6 +361,7 @@ function MemberTaskOverview({ user, requests, leads, showClaimableTasks, onClaim
     <div className="member-task-main">
       <button type="button" className="member-task-open" onClick={() => onOpen(task)} aria-label={`Open ${task.kind === 'part_request' ? 'product details for' : 'details for'} ${task.title}`}>
         <strong>{task.title}</strong>
+        {task.kind === 'part_request' && task.company && <span className="member-task-company">{task.company}</span>}
         <span>{task.kind === 'part_request' ? 'Part request' : 'Sponsor lead'} · Posted by {task.sourceSubteam} <ArrowUpRight size={12} /></span>
       </button>
     </div>
@@ -902,7 +906,7 @@ function App() {
   const [statusFilter, setStatusFilter] = useState('All statuses')
   const [requestFolder, setRequestFolder] = useState<'active' | 'closed'>('active')
   const [subteamFilter, setSubteamFilter] = useState('')
-  const [requestSort, setRequestSort] = useState<'newest' | 'urgency'>('newest')
+  const [requestSort, setRequestSort] = useState<'newest' | 'urgency' | 'assigned'>('newest')
   const [leadStatusFilter, setLeadStatusFilter] = useState('All lead statuses')
   const workspaceRefreshInProgress = useRef(false)
   const workspaceRefreshRequested = useRef(false)
@@ -1185,6 +1189,15 @@ function App() {
     return matchesQuery && matchesSubteam && (statusFilter === 'All statuses' || request.status === statusFilter)
   }).sort((left, right) => {
     if (requestSort === 'newest') return 0
+    if (requestSort === 'assigned') {
+      const leftAssignee = teamMembers.find((member) => member.id === left.assigneeId)?.displayName || ''
+      const rightAssignee = teamMembers.find((member) => member.id === right.assigneeId)?.displayName || ''
+      if (!leftAssignee || !rightAssignee) {
+        if (!leftAssignee && rightAssignee) return 1
+        if (leftAssignee && !rightAssignee) return -1
+      }
+      return leftAssignee.localeCompare(rightAssignee, undefined, { sensitivity: 'base' }) || left.item.localeCompare(right.item, undefined, { sensitivity: 'base' })
+    }
     const urgency = { Urgent: 0, High: 1, Normal: 2, Low: 3 }
     return urgency[left.priority] - urgency[right.priority]
   })
@@ -1573,7 +1586,7 @@ function App() {
               <div className="table-toolbar-controls">
                 <label className="select-control"><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option>{(requestFolder === 'active' ? ['Needed', 'Outreach', 'In transit'] : ['Received', 'Closed']).map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={15} /></label>
                 <label className="select-control"><span className="sr-only">Filter by subteam</span><select value={subteamFilter} onChange={(event) => setSubteamFilter(event.target.value)}><option value="">All subteams</option>{requestSubteams.map((subteam) => <option key={subteam} value={subteam}>{subteam}</option>)}</select><ChevronDown size={15} /></label>
-                <label className="select-control"><span className="sr-only">Sort part requests</span><select value={requestSort} onChange={(event) => setRequestSort(event.target.value as 'newest' | 'urgency')}><option value="newest">Sort: newest</option><option value="urgency">Sort: urgency</option></select><ChevronDown size={15} /></label>
+                <label className="select-control"><span className="sr-only">Sort part requests</span><select value={requestSort} onChange={(event) => setRequestSort(event.target.value as 'newest' | 'urgency' | 'assigned')}><option value="newest">Sort: newest</option><option value="urgency">Sort: urgency</option><option value="assigned">Sort: assigned to</option></select><ChevronDown size={15} /></label>
               </div>
             </div>
             <div className="table-scroll"><table className="part-request-table"><thead><tr><th>PART / COMPANY</th><th>SUBTEAM</th><th>PRIORITY</th><th>ASSIGNED TO</th><th>COMPATIBILITY</th><th>COMMUNICATION</th><th>PART STATUS</th><th>VALUE</th><th className="row-actions">ACTIONS</th></tr></thead><tbody>
@@ -1584,7 +1597,7 @@ function App() {
                 <td className="compat-cell" title={request.compatibility}>{request.compatibility || 'Not provided'}</td>
                 <td><select className="inline-select" aria-label={`Communication status for ${request.item}`} value={request.communication} disabled={!canEditSharedRecords} onChange={(event) => updateRequest(request.id, 'communication', event.target.value)}><option>Not started</option><option>Contacted</option><option>Follow-up</option><option>Confirmed</option></select></td>
                 <td><select className="inline-select" aria-label={`Part status for ${request.item}`} value={request.status} disabled={!canEditSharedRecords} onChange={(event) => updateRequest(request.id, 'status', event.target.value)}><option>Needed</option><option>Outreach</option><option>In transit</option><option>Received</option><option>Closed</option></select></td>
-                <td className="amount-cell">{money(request.value)}</td><td className="row-actions">{canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${request.item}`} aria-label={`Edit part request for ${request.item}`} onClick={() => setManagementEdit({ kind: 'request', record: request })}><Pencil size={15} /></button>{!['Received', 'Closed'].includes(request.status) && <button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button>}</>}</td>
+                <td className="amount-cell">{money(request.value)}</td><td className="row-actions">{canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${request.item}`} aria-label={`Edit part request for ${request.item}`} onClick={() => setManagementEdit({ kind: 'request', record: request })}><Pencil size={15} /></button><button type="button" className="icon-button row-action-button" title={`Delete ${request.item}`} aria-label={`Delete part request for ${request.item}`} onClick={() => void deleteRequest(request)}><Trash2 size={15} /></button></>}</td>
               </tr>)}
               {filteredRequests.length === 0 && <tr><td colSpan={9} className="empty-table">No requests match this search.</td></tr>}
             </tbody></table></div>

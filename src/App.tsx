@@ -1400,6 +1400,7 @@ function App() {
     try {
       await removeSponsorLead(lead.id)
       setSponsorLeads((current) => current.filter((item) => item.id !== lead.id))
+      setModal(null)
       setActionError('')
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not delete this sponsor lead.')
@@ -1611,7 +1612,7 @@ function App() {
                 <td><button type="button" className="sponsor-detail-trigger" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-detail') }}><span className="table-title">{sponsor.company}</span><span className="table-subtitle"><Eye size={12} /> View full sponsorship</span></button></td><td>{sponsor.contact || 'Not provided'}</td><td className="amount-cell">{money(sponsor.amount)}</td>
                 <td><select className="inline-select" aria-label={`Sponsorship status for ${sponsor.company}`} value={sponsor.status} disabled={!canEditSharedRecords} onChange={(event) => updateSponsorStatus(sponsor.id, event.target.value as SponsorStatus)}><option>Prospect</option><option>Proposal sent</option><option>Committed</option><option>Received</option></select></td>
                 <td><button type="button" className="sponsor-deliverables-trigger" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-detail') }}>{sponsor.deliverables.length ? `${sponsor.deliverables.length} agreed` : 'View details'}</button></td><td>{sponsor.relationship}</td><td>{sponsor.renewal || 'Not set'}</td>
-                <td>{canEditSharedRecords && <button type="button" className="button secondary sponsor-row-edit" onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-edit') }} aria-label={`Edit sponsorship details for ${sponsor.company}`}><Pencil size={14} /> Edit</button>}</td>
+                <td>{canEditSharedRecords && <div className="row-actions"><button type="button" className="icon-button row-action-button" title={`Edit ${sponsor.company}`} aria-label={`Edit sponsorship for ${sponsor.company}`} onClick={() => { setSelectedSponsorId(sponsor.id); setSponsorModal('sponsor-edit') }}><Pencil size={15} /></button><button type="button" className="icon-button row-action-button" title={`Delete ${sponsor.company}`} aria-label={`Delete sponsorship for ${sponsor.company}`} onClick={() => void deleteSponsor(sponsor)}><Trash2 size={15} /></button></div>}</td>
               </tr>)}
               {filteredSponsors.length === 0 && <tr><td colSpan={8} className="empty-table">No sponsors match this search.</td></tr>}
             </tbody></table></div>
@@ -1635,7 +1636,7 @@ function App() {
                   <AssignmentSelect assignedId={lead.assigneeId} user={user} members={teamMembers} requesterSubteam={lead.requesterSubteam || lead.subteam} label={`Assignment for sponsor lead ${lead.company}`} onChange={(assigneeId) => void updateSponsorLeadAssignee(lead.id, assigneeId)} />
                   <select className="inline-select lead-status-select" aria-label={`Follow-up status for ${lead.company}`} value={lead.status} disabled={!canEditSharedRecords} onChange={(event) => void updateSponsorLeadStatus(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select>
                   {canEditSharedRecords && <><button type="button" className="icon-button row-action-button" title={`Edit ${lead.company}`} aria-label={`Edit sponsor lead for ${lead.company}`} onClick={() => setManagementEdit({ kind: 'lead', record: lead })}><Pencil size={15} /></button>
-                  {!['Converted', 'Not pursuing'].includes(lead.status) && <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button>}</>}
+                  <button type="button" className="icon-button row-action-button" title={`Delete ${lead.company}`} aria-label={`Delete sponsor lead for ${lead.company}`} onClick={() => void deleteSponsorLead(lead)}><Trash2 size={15} /></button></>}
                 </div>
               </article>)}
               {filteredSponsorLeads.length === 0 && <div className="empty-state lead-empty-state">No sponsor leads yet. Submit a business connection for follow-up.</div>}
@@ -1652,7 +1653,7 @@ function App() {
       {sponsorModal === 'sponsor-edit' && selectedSponsor && <SponsorModal sponsor={selectedSponsor} onClose={() => setSponsorModal('sponsor-detail')} onSave={(input) => editSponsor(selectedSponsor.id, input)} />}
       {sponsorModal === 'sponsor-detail' && selectedSponsor && <SponsorDetailsModal sponsor={selectedSponsor} canEdit={canEditSharedRecords} onClose={() => setSponsorModal(null)} onEdit={() => setSponsorModal('sponsor-edit')} onDelete={() => void deleteSponsor(selectedSponsor)} onDeliverableStatusChange={updateDeliverableStatus} onAddNote={(body) => addRecordNoteTo('sponsorship', selectedSponsor.id, body)} />}
       {modal === 'lead' && <SponsorLeadModal onClose={() => setModal(null)} onSave={addSponsorLead} />}
-      {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} canEdit={canEditSharedRecords} onClose={() => setModal(null)} onStatusChange={updateSponsorLeadStatus} onAddNote={(body) => addRecordNoteTo('sponsor_lead', selectedSponsorLead.id, body)} />}
+      {modal === 'lead-detail' && selectedSponsorLead && <SponsorLeadDetailsModal lead={selectedSponsorLead} canEdit={canEditSharedRecords} onClose={() => setModal(null)} onEdit={() => { setModal(null); setManagementEdit({ kind: 'lead', record: selectedSponsorLead }) }} onDelete={() => void deleteSponsorLead(selectedSponsorLead)} onStatusChange={updateSponsorLeadStatus} onAddNote={(body) => addRecordNoteTo('sponsor_lead', selectedSponsorLead.id, body)} />}
       {modal === 'part-detail' && selectedRequest && <PartRequestDetailsModal request={selectedRequest} assignee={teamMembers.find((member) => member.id === selectedRequest.assigneeId)} canEdit={canEditSharedRecords} onClose={() => setModal(null)} onAddNote={(body) => addRecordNoteTo('part_request', selectedRequest.id, body)} />}
       {managementEdit?.kind === 'user' && <ManagementUserModal
         key={managementEdit.user.id}
@@ -1831,7 +1832,7 @@ function SponsorLeadModal({ lead, onClose, onSave }: { lead?: SponsorLead; onClo
   </section></div>
 }
 
-function SponsorLeadDetailsModal({ lead, canEdit, onClose, onStatusChange, onAddNote }: { lead: SponsorLead; canEdit: boolean; onClose: () => void; onStatusChange: (id: string, status: SponsorLeadStatus) => Promise<void>; onAddNote: (body: string) => Promise<void> }) {
+function SponsorLeadDetailsModal({ lead, canEdit, onClose, onEdit, onDelete, onStatusChange, onAddNote }: { lead: SponsorLead; canEdit: boolean; onClose: () => void; onEdit: () => void; onDelete: () => void; onStatusChange: (id: string, status: SponsorLeadStatus) => Promise<void>; onAddNote: (body: string) => Promise<void> }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal lead-details-modal" role="dialog" aria-modal="true" aria-labelledby="lead-details-title">
     <div className="modal-heading"><div><span className="section-kicker">SPONSOR LEAD · SUBMITTED BY {lead.createdBy.toUpperCase()}</span><h2 id="lead-details-title">{lead.company}</h2><p>{lead.subteam || 'Team connection'} · Submitted {lead.createdAt}</p></div><button className="icon-button close-button" onClick={onClose} aria-label="Close lead details"><X size={19} /></button></div>
     <div className="lead-details-content">
@@ -1843,7 +1844,7 @@ function SponsorLeadDetailsModal({ lead, canEdit, onClose, onStatusChange, onAdd
       <label className="lead-detail-status"><span>Business team follow-up</span><select className="inline-select" value={lead.status} disabled={!canEdit} onChange={(event) => void onStatusChange(lead.id, event.target.value as SponsorLeadStatus)}><option>New</option><option>Following up</option><option>Contacted</option><option>Converted</option><option>Not pursuing</option></select></label>
       <ActivityPanel activity={lead.activity} canEdit={canEdit} onAddNote={onAddNote} />
     </div>
-    <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Close</button></div>
+    <div className="modal-actions">{canEdit && <button type="button" className="button secondary delete-sponsor-button" onClick={onDelete}><Trash2 size={15} /> Delete lead</button>}<button type="button" className="button secondary" onClick={onClose}>Close</button>{canEdit && <button type="button" className="button primary" onClick={onEdit}>Edit lead</button>}</div>
   </section></div>
 }
 

@@ -56,6 +56,17 @@
 .workload-member { min-width: 145px; display: grid; gap: 4px; border-left: 1px solid #e6e9e4; padding: 4px 10px; }
 .workload-member strong { color: #34493e; font-size: 11px; }
 .workload-member span, .workload-summary > p { color: #78847c; font-size: 10px; }
+.workload-member-button { width: auto; border: 0; border-left: 1px solid #e6e9e4; border-radius: 0; background: transparent; text-align: left; cursor: pointer; }
+.workload-member-button:hover strong { color: #730f0f; text-decoration: underline; text-decoration-color: #d6af36; text-underline-offset: 3px; }
+.workload-summary-page { display: flex; }
+.workload-modal { width: min(680px, calc(100vw - 32px)); }
+.workload-modal-content { display: grid; gap: 14px; max-height: 55vh; overflow-y: auto; }
+.workload-task-list { display: grid; gap: 8px; }
+.workload-task { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #ece9e3; border-radius: 4px; padding: 10px 12px; background: #fcfbf9; }
+.workload-task > div { min-width: 0; display: grid; gap: 4px; }
+.workload-task strong { color: #34493e; font-size: 12px; }
+.workload-task div span { color: #78847c; font-size: 10px; }
+.workload-status { flex: 0 0 auto; border-radius: 12px; padding: 5px 8px; color: #5d6f64; background: #edf1ec; font-size: 10px; font-weight: 700; }
 .bulk-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 0 12px; }
 .bulk-toolbar > strong { margin-right: auto; color: #5d6f64; font-size: 11px; }
 .bulk-toolbar .select-control select { max-width: 190px; }

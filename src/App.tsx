@@ -540,7 +540,93 @@ function AccountSettings({ user, subteamRequests, onSave, onRequestSubteamChange
   </div>
 }
 
-function ManagementTab({ users, members, currentUserId, requests, sponsors, leads, onEditUser, onToggleUserActive, onEditRequest, onEditSponsor, onEditLead, onBulkRequestUpdate, onBulkLeadUpdate }: {
+function MemberWorkloadModal({ member, requests, leads, onClose }: {
+  member: TeamMember
+  requests: PartRequest[]
+  leads: SponsorLead[]
+  onClose: () => void
+}) {
+  const memberRequests = requests
+    .filter((request) => request.assigneeId === member.id)
+    .sort((left, right) => left.item.localeCompare(right.item, undefined, { sensitivity: 'base' }))
+  const memberLeads = leads
+    .filter((lead) => lead.assigneeId === member.id)
+    .sort((left, right) => left.company.localeCompare(right.company, undefined, { sensitivity: 'base' }))
+  const openRequests = memberRequests.filter((request) => !['Received', 'Closed'].includes(request.status))
+  const openLeads = memberLeads.filter((lead) => !['Converted', 'Not pursuing'].includes(lead.status))
+  const closedRequests = memberRequests.filter((request) => ['Received', 'Closed'].includes(request.status))
+  const closedLeads = memberLeads.filter((lead) => ['Converted', 'Not pursuing'].includes(lead.status))
+
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <section className="modal workload-modal" role="dialog" aria-modal="true" aria-labelledby="workload-title">
+      <div className="modal-heading">
+        <div><span className="section-kicker">OPEN WORK BY MEMBER</span><h2 id="workload-title">{member.displayName}</h2><p>{member.subteam || 'Subteam not set'} · {openRequests.length + openLeads.length} open tasks</p></div>
+        <button className="icon-button close-button" onClick={onClose} aria-label="Close"><X size={19} /></button>
+      </div>
+      <div className="workload-modal-content">
+        <section className="lead-details-section">
+          <h3>Open tasks ({openRequests.length + openLeads.length})</h3>
+          {openRequests.length === 0 && openLeads.length === 0
+            ? <p>No open tasks assigned.</p>
+            : <div className="workload-task-list">
+              {openRequests.map((request) => <div className="workload-task" key={request.id}>
+                <div><strong>{request.item}</strong><span>Part request · {request.company || 'No company specified'}</span></div>
+                <span className={`workload-status status-${request.status.toLowerCase().replaceAll(' ', '-')}`}>{request.status}</span>
+              </div>)}
+              {openLeads.map((lead) => <div className="workload-task" key={lead.id}>
+                <div><strong>{lead.company}</strong><span>Sponsor lead · {lead.subteam || 'No subteam specified'}</span></div>
+                <span className={`workload-status status-${lead.status.toLowerCase().replaceAll(' ', '-')}`}>{lead.status}</span>
+              </div>)}
+            </div>}
+        </section>
+        {(closedRequests.length > 0 || closedLeads.length > 0) && <section className="lead-details-section">
+          <h3>Closed tasks ({closedRequests.length + closedLeads.length})</h3>
+          <div className="workload-task-list">
+            {closedRequests.map((request) => <div className="workload-task" key={request.id}>
+              <div><strong>{request.item}</strong><span>Part request · {request.company || 'No company specified'}</span></div>
+              <span className="workload-status">{request.status}</span>
+            </div>)}
+            {closedLeads.map((lead) => <div className="workload-task" key={lead.id}>
+              <div><strong>{lead.company}</strong><span>Sponsor lead · {lead.subteam || 'No subteam specified'}</span></div>
+              <span className="workload-status">{lead.status}</span>
+            </div>)}
+          </div>
+        </section>}
+      </div>
+      <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Close</button></div>
+    </section>
+  </div>
+}
+
+function TeamWorkloadTab({ members, requests, leads }: {
+  members: TeamMember[]
+  requests: PartRequest[]
+  leads: SponsorLead[]
+}) {
+  const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null)
+  const selectedMember = members.find((member) => member.id === selectedMemberId) ?? null
+
+  return <>
+    <section className="section-block management-panel">
+      <div className="section-heading"><div><span className="section-kicker">TEAM WORKLOAD</span><h2>Open work by member</h2></div></div>
+      <p>Open a member's name to see their assigned tasks and current statuses.</p>
+      <div className="workload-summary workload-summary-page">
+        {members.filter((member) => member.active).map((member) => {
+          const requestCount = requests.filter((record) => record.assigneeId === member.id && !['Received', 'Closed'].includes(record.status)).length
+          const leadCount = leads.filter((record) => record.assigneeId === member.id && !['Converted', 'Not pursuing'].includes(record.status)).length
+          return <button type="button" className="workload-member workload-member-button" key={member.id} onClick={() => setSelectedMemberId(member.id)}>
+            <strong>{member.displayName}</strong>
+            <span>{requestCount} requests · {leadCount} leads</span>
+          </button>
+        })}
+        {!members.some((member) => member.active) && <p>No active team members found.</p>}
+      </div>
+    </section>
+    {selectedMember && <MemberWorkloadModal member={selectedMember} requests={requests} leads={leads} onClose={() => setSelectedMemberId(null)} />}
+  </>
+}
+
+function ManagementTab({ users, members, currentUserId, requests, sponsors, leads, onEditUser, onToggleUserActive, onEditRequest, onEditSponsor, onDeleteSponsor, onEditLead, onBulkRequestUpdate, onBulkLeadUpdate }: {
   users: TeamUser[]
   members: TeamMember[]
   currentUserId: string
@@ -551,6 +637,7 @@ function ManagementTab({ users, members, currentUserId, requests, sponsors, lead
   onToggleUserActive: (user: TeamUser) => void
   onEditRequest: (request: PartRequest) => void
   onEditSponsor: (sponsor: Sponsor) => void
+  onDeleteSponsor: (sponsor: Sponsor) => void
   onEditLead: (lead: SponsorLead) => void
   onBulkRequestUpdate: (ids: string[], changes: { assigneeId?: string; status?: RequestStatus }) => Promise<void>
   onBulkLeadUpdate: (ids: string[], changes: { assigneeId?: string; status?: SponsorLeadStatus }) => Promise<void>
@@ -568,6 +655,7 @@ function ManagementTab({ users, members, currentUserId, requests, sponsors, lead
   const [bulkLeadStatus, setBulkLeadStatus] = useState('__unchanged')
   const [bulkError, setBulkError] = useState('')
   const [bulkSaving, setBulkSaving] = useState(false)
+  const [selectedWorkloadMemberId, setSelectedWorkloadMemberId] = useState<string | null>(null)
   const subteams = [...new Map(users.filter((member) => member.subteam.trim()).map((member) => [
     member.subteam.trim().toLocaleLowerCase(),
     member.subteam.trim(),
@@ -610,6 +698,7 @@ function ManagementTab({ users, members, currentUserId, requests, sponsors, lead
       return true
     })
     .sort((first, second) => first.displayName.localeCompare(second.displayName, undefined, { sensitivity: 'base' }))
+  const selectedWorkloadMember = members.find((member) => member.id === selectedWorkloadMemberId) ?? null
   const sections = [
     { id: 'users' as const, label: 'Users', count: users.length },
     { id: 'requests' as const, label: 'Part requests', count: requests.length },
@@ -655,7 +744,8 @@ function ManagementTab({ users, members, currentUserId, requests, sponsors, lead
     }
   }
 
-  return <section className="section-block management-panel">
+  return <>
+  <section className="section-block management-panel">
     <div className="section-heading"><div><span className="section-kicker">DEV ADMINISTRATION</span><h2>Manage workspace</h2></div></div>
     <p>Edit team member profiles and subteam assignments, or edit any shared workspace record.</p>
     <div className="management-tabs" role="tablist" aria-label="Management categories">
@@ -685,7 +775,7 @@ function ManagementTab({ users, members, currentUserId, requests, sponsors, lead
         {members.filter((member) => member.active).map((member) => {
           const requestCount = requests.filter((record) => record.assigneeId === member.id && !['Received', 'Closed'].includes(record.status)).length
           const leadCount = leads.filter((record) => record.assigneeId === member.id && !['Converted', 'Not pursuing'].includes(record.status)).length
-          return <div className="workload-member" key={member.id}><strong>{member.displayName}</strong><span>{requestCount} requests · {leadCount} leads</span></div>
+          return <button type="button" className="workload-member workload-member-button" key={member.id} onClick={() => setSelectedWorkloadMemberId(member.id)}><strong>{member.displayName}</strong><span>{requestCount} requests · {leadCount} leads</span></button>
         })}
         {!members.length && <p>No active team members found.</p>}
       </section>
@@ -746,7 +836,7 @@ function ManagementTab({ users, members, currentUserId, requests, sponsors, lead
       <thead><tr><th>COMPANY</th><th>CONTACT</th><th>AMOUNT</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
       <tbody>{visibleSponsors.map((record) => <tr key={record.id}>
         <td>{record.company}</td><td>{record.contact || '—'}</td><td>{money(record.amount)}</td><td>{record.status}</td>
-        <td><button className="button secondary management-edit-button" type="button" onClick={() => onEditSponsor(record)}><Pencil size={14} /> Edit</button></td>
+        <td><div className="management-user-actions"><button className="button secondary management-edit-button" type="button" onClick={() => onEditSponsor(record)}><Pencil size={14} /> Edit</button><button className="button danger-button management-edit-button" type="button" onClick={() => onDeleteSponsor(record)}><Trash2 size={14} /> Delete</button></div></td>
       </tr>)}</tbody>
       </table></div>
       {visibleSponsors.length === 0 && sponsors.length > 0 && <div className="empty-state">No sponsorships match this status.</div>}
@@ -789,6 +879,8 @@ function ManagementTab({ users, members, currentUserId, requests, sponsors, lead
       || (section === 'sponsors' && sponsors.length === 0)
       || (section === 'leads' && leads.length === 0)) && <div className="empty-state">No records to manage.</div>}
   </section>
+  {selectedWorkloadMember && <MemberWorkloadModal member={selectedWorkloadMember} requests={requests} leads={leads} onClose={() => setSelectedWorkloadMemberId(null)} />}
+  </>
 }
 
 function accessTagLabel(tag: TeamUser['tag']) {
@@ -1406,8 +1498,8 @@ function App() {
       setActionError(error instanceof Error ? error.message : 'Could not delete this sponsor lead.')
     }
   }
-  const pageTitle = view === 'my-tasks' || view === 'overview' && user?.tag === 'member' ? 'My tasks' : view === 'overview' ? 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : view === 'management' ? 'Management' : 'Account'
-  const pageDescription = view === 'my-tasks' ? 'Review assigned tasks, open product details, and show completed tasks when needed.' : view === 'overview' && user?.tag === 'member' ? 'See your assignments, claim eligible work, and keep task progress up to date.' : view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Review active requests or find completed requests in their own folder.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
+  const pageTitle = view === 'my-tasks' || view === 'overview' && user?.tag === 'member' ? 'My tasks' : view === 'overview' ? 'Internal Requests' : view === 'parts' ? 'Part requests' : view === 'sponsors' ? 'Sponsorships' : view === 'sponsor-leads' ? 'Sponsor leads' : view === 'management' ? user?.tag === 'stl' ? 'Team workload' : 'Management' : 'Account'
+  const pageDescription = view === 'my-tasks' ? 'Review assigned tasks, open product details, and show completed tasks when needed.' : view === 'overview' && user?.tag === 'member' ? 'See your assignments, claim eligible work, and keep task progress up to date.' : view === 'overview' ? 'A clear view of what the team needs and who is helping.' : view === 'parts' ? 'Review active requests or find completed requests in their own folder.' : view === 'sponsors' ? 'Track proposals, commitments, deliverables, and renewals.' : view === 'sponsor-leads' ? 'Potential sponsor connections submitted for the business team to follow up.' : view === 'management' ? user?.tag === 'stl' ? 'View team assignments and the current status of assigned tasks.' : 'Manage team members and shared workspace data.' : 'Update your profile or permanently delete your account.'
   if (!authReady) return <main className="auth-shell"><div className="auth-panel auth-loading"><img className="auth-logo" src="https://Digemaggies.org/assets/logo/Dig_Em_Logo.png" alt="Dig 'Em Aggies" /><p>Connecting to the team workspace...</p></div></main>
   if (!user) return <AuthScreen onAuthenticate={authenticate} onResetPassword={finishPasswordReset} onRequestPasswordReset={requestPasswordReset} initialError={authError} />
   const pendingSubteamRequestCount = subteamRequests.filter((request) => request.status === 'pending' && request.userId !== user.id).length
@@ -1428,7 +1520,7 @@ function App() {
           <button className={view === 'sponsor-leads' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsor-leads')}><ContactRound size={18} /> Sponsor leads <span className="nav-count">{openSponsorLeadCount}</span></button>
           <button className={view === 'sponsors' ? 'nav-item active' : 'nav-item'} onClick={() => setView('sponsors')}><Handshake size={18} /> Sponsorships</button>
           <button className={view === 'account' ? 'nav-item active' : 'nav-item'} onClick={() => setView('account')}><Settings size={18} /> Account{showSubteamRequestCount && pendingSubteamRequestCount > 0 && <span className="nav-count" aria-label={`${pendingSubteamRequestCount} pending subteam change request${pendingSubteamRequestCount === 1 ? '' : 's'}`}>{pendingSubteamRequestCount}</span>}</button>
-          {user.tag === 'dev' && <button className={view === 'management' ? 'nav-item active' : 'nav-item'} onClick={() => setView('management')}><Shield size={18} /> Management</button>}
+          {(user.tag === 'dev' || user.tag === 'stl') && <button className={view === 'management' ? 'nav-item active' : 'nav-item'} onClick={() => setView('management')}><Shield size={18} /> {user.tag === 'dev' ? 'Management' : 'Team workload'}</button>}
         </nav>
         <div className="sidebar-bottom">
           <div className="workspace-status"><span className="status-dot" /> Team workspace</div>
@@ -1470,6 +1562,11 @@ function App() {
             onCancelSubteamChange={cancelAccountSubteamChange}
             onDelete={removeAccount}
           />}
+          {view === 'management' && user.tag === 'stl' && <TeamWorkloadTab
+            members={teamMembers}
+            requests={requests}
+            leads={sponsorLeads}
+          />}
           {view === 'management' && user.tag === 'dev' && <ManagementTab
             users={managementUsers}
             members={teamMembers}
@@ -1481,6 +1578,7 @@ function App() {
             onToggleUserActive={(member) => void toggleManagementUserActive(member)}
             onEditRequest={(record) => setManagementEdit({ kind: 'request', record })}
             onEditSponsor={(record) => setManagementEdit({ kind: 'sponsor', record })}
+            onDeleteSponsor={(record) => void deleteSponsor(record)}
             onEditLead={(record) => setManagementEdit({ kind: 'lead', record })}
             onBulkRequestUpdate={bulkUpdateRequests}
             onBulkLeadUpdate={bulkUpdateLeads}
